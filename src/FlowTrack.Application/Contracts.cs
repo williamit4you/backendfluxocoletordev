@@ -8,10 +8,14 @@ public record LoginRequest(string Email, string Password);
 public record LoginResponse(string Token, UserDto User);
 public record UserDto(Guid Id, string Name, string Email, string Role, bool Active);
 public record CreateUserRequest(string Name, string Email, string Password, string Role);
-public record FieldDto(Guid? Id, string Key, string Label, FieldType Type, bool Required, int Order, string? OptionsJson);
-public record StepDto(Guid? Id, string Name, string? Description, StepType Type, int Order, Guid? AssignedUserId, string? ConfigurationJson);
-public record FlowDto(Guid Id, string Name, string Description, EntryType EntryType, bool Active, IReadOnlyList<FieldDto> Fields, IReadOnlyList<StepDto> Steps);
-public record CreateFlowRequest(string Name, string Description, EntryType EntryType, IReadOnlyList<FieldDto> Fields, IReadOnlyList<StepDto> Steps);
+public record UpdateUserRequest(string Name, string Role, bool Active, string? Password);
+public record FieldOptionDto(Guid? Id, string Label, string Value, int Order);
+public record FieldDto(Guid? Id, string Key, string Label, FieldType Type, bool Required, int Order, IReadOnlyList<FieldOptionDto> Options);
+public record FlowTokenDto(Guid? Id, string Name, string? Value, TokenType Type, string? HeaderName, bool Active);
+public record StepApiConfigDto(string? Url, string? Method, string? TokenName, string? ScheduleMode, string? ScheduleValue, string? QueryTemplate, bool ValidateTls);
+public record StepDto(Guid? Id, string Name, string? Description, StepType Type, int Order, Guid? AssignedUserId, IReadOnlyList<FieldDto> Fields, StepApiConfigDto? ApiConfig);
+public record FlowDto(Guid Id, string Name, string Description, bool Active, IReadOnlyList<FlowTokenDto> Tokens, IReadOnlyList<StepDto> Steps);
+public record SaveFlowRequest(string Name, string Description, bool Active, IReadOnlyList<FlowTokenDto> Tokens, IReadOnlyList<StepDto> Steps);
 public record CreateInstanceRequest(Guid FlowDefinitionId, string? Code, Dictionary<string, JsonElement> Data);
 public record AdvanceStepRequest(string? Notes);
 public record StepProgressDto(Guid Id, string Name, int Order, StepType Type, StepStatus Status, DateTime? StartedAt, DateTime? CompletedAt);
@@ -35,7 +39,8 @@ public sealed class MappingProfile : Profile
 {
     public MappingProfile()
     {
-        CreateMap<FlowField, FieldDto>();
-        CreateMap<FlowStep, StepDto>();
+        CreateMap<StepFieldOption, FieldOptionDto>();
+        CreateMap<StepField, FieldDto>();
+        CreateMap<FlowToken, FlowTokenDto>().ForMember(x => x.Value, o => o.Ignore());
     }
 }

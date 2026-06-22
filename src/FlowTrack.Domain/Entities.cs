@@ -1,11 +1,12 @@
 namespace FlowTrack.Domain;
 
 public enum UserRole { SuperAdmin, Admin, User }
-public enum EntryType { Manual, Reader, Automatic }
-public enum StepType { Reader, UserTask, ExternalMonitor, Automatic }
+public enum EntryType { Manual, Reader, Automatic, ApiSend, ApiQuery }
+public enum StepType { Reader, UserTask, ExternalMonitor, Automatic, ApiSend, ApiQuery }
 public enum FieldType { Text, Number, Date, Document, Email, Select }
 public enum InstanceStatus { InProgress, Completed, Cancelled }
 public enum StepStatus { Pending, InProgress, Completed, Failed }
+public enum TokenType { Bearer, ApiKey }
 
 public abstract class Entity { public Guid Id { get; set; } = Guid.NewGuid(); }
 
@@ -22,22 +23,39 @@ public sealed class FlowDefinition : Entity
 {
     public string Name { get; set; } = "";
     public string Description { get; set; } = "";
-    public EntryType EntryType { get; set; }
     public bool Active { get; set; } = true;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
-    public List<FlowField> Fields { get; set; } = [];
+    public List<FlowToken> Tokens { get; set; } = [];
     public List<FlowStep> Steps { get; set; } = [];
 }
 
-public sealed class FlowField : Entity
+public sealed class FlowToken : Entity
 {
     public Guid FlowDefinitionId { get; set; }
+    public string Name { get; set; } = "";
+    public string Value { get; set; } = "";
+    public TokenType Type { get; set; } = TokenType.Bearer;
+    public string? HeaderName { get; set; }
+    public bool Active { get; set; } = true;
+}
+
+public sealed class StepField : Entity
+{
+    public Guid FlowStepId { get; set; }
     public string Key { get; set; } = "";
     public string Label { get; set; } = "";
     public FieldType Type { get; set; }
     public bool Required { get; set; }
     public int Order { get; set; }
-    public string? OptionsJson { get; set; }
+    public List<StepFieldOption> Options { get; set; } = [];
+}
+
+public sealed class StepFieldOption : Entity
+{
+    public Guid StepFieldId { get; set; }
+    public string Label { get; set; } = "";
+    public string Value { get; set; } = "";
+    public int Order { get; set; }
 }
 
 public sealed class FlowStep : Entity
@@ -49,6 +67,7 @@ public sealed class FlowStep : Entity
     public int Order { get; set; }
     public Guid? AssignedUserId { get; set; }
     public string? ConfigurationJson { get; set; }
+    public List<StepField> Fields { get; set; } = [];
 }
 
 public sealed class FlowInstance : Entity
