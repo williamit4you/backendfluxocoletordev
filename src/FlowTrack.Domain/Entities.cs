@@ -7,6 +7,7 @@ public enum FieldType { Text, Number, Date, Document, Email, Select }
 public enum InstanceStatus { InProgress, Completed, Cancelled }
 public enum StepStatus { Pending, InProgress, Completed, Failed }
 public enum TokenType { Bearer, ApiKey }
+public enum FlowLifecycleStatus { Draft, Published, Archived }
 
 public abstract class Entity { public Guid Id { get; set; } = Guid.NewGuid(); }
 
@@ -21,10 +22,14 @@ public sealed class AppUser : Entity
 
 public sealed class FlowDefinition : Entity
 {
+    public Guid FlowKey { get; set; } = Guid.NewGuid();
     public string Name { get; set; } = "";
     public string Description { get; set; } = "";
     public bool Active { get; set; } = true;
+    public int VersionNumber { get; set; } = 1;
+    public FlowLifecycleStatus LifecycleStatus { get; set; } = FlowLifecycleStatus.Draft;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public DateTime? PublishedAt { get; set; }
     public List<FlowToken> Tokens { get; set; } = [];
     public List<FlowStep> Steps { get; set; } = [];
 }

@@ -22,10 +22,11 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
     protected override void OnModelCreating(ModelBuilder b)
     {
         b.HasPostgresEnum<UserRole>(); b.HasPostgresEnum<EntryType>(); b.HasPostgresEnum<StepType>();
-        b.HasPostgresEnum<FieldType>(); b.HasPostgresEnum<InstanceStatus>(); b.HasPostgresEnum<StepStatus>(); b.HasPostgresEnum<TokenType>();
+        b.HasPostgresEnum<FieldType>(); b.HasPostgresEnum<InstanceStatus>(); b.HasPostgresEnum<StepStatus>(); b.HasPostgresEnum<TokenType>(); b.HasPostgresEnum<FlowLifecycleStatus>();
         b.Entity<AppUser>().HasIndex(x => x.Email).IsUnique();
         b.Entity<FlowToken>().HasIndex(x => new { x.FlowDefinitionId, x.Name }).IsUnique();
         b.Entity<FlowStep>().HasIndex(x => new { x.FlowDefinitionId, x.Order }).IsUnique();
+        b.Entity<FlowDefinition>().HasIndex(x => new { x.FlowKey, x.VersionNumber }).IsUnique();
         b.Entity<StepField>().HasIndex(x => new { x.FlowStepId, x.Key }).IsUnique();
         b.Entity<StepFieldOption>().HasIndex(x => new { x.StepFieldId, x.Order }).IsUnique();
         b.Entity<FlowDefinition>().HasMany(x => x.Tokens).WithOne().HasForeignKey(x => x.FlowDefinitionId).OnDelete(DeleteBehavior.Cascade);

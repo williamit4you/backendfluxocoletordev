@@ -31,9 +31,13 @@ internal static class SeedData
         {
             var flow = new FlowDefinition
             {
+                FlowKey = Guid.NewGuid(),
                 Name = "Recebimento de caminhão / NF-e",
                 Description = "Acompanhamento da entrada até a saída de produção.",
                 Active = true,
+                VersionNumber = 1,
+                LifecycleStatus = FlowLifecycleStatus.Published,
+                PublishedAt = DateTime.UtcNow,
                 Tokens = [],
                 Steps =
                 [

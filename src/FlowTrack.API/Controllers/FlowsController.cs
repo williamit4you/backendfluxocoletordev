@@ -16,15 +16,42 @@ public sealed class FlowsController : ControllerBase
 {
     [HttpGet]
     public async Task<ActionResult<IReadOnlyList<FlowDto>>> GetAll(
+        [FromQuery] string? scope,
         [FromServices] AppDbContext db,
         [FromServices] IMapper mapper)
     {
-        var flows = await LoadFlows(db)
+        var normalizedScope = string.Equals(scope, "builder", StringComparison.OrdinalIgnoreCase) ? "builder" : "runtime";
+        var rows = await LoadFlows(db)
             .AsNoTracking()
             .OrderBy(x => x.Name)
+            .ThenByDescending(x => x.VersionNumber)
             .ToListAsync();
 
-        return Ok(flows.Select(x => FlowDefinitionMapper.ToDto(x, mapper)).ToList());
+        if (normalizedScope == "runtime")
+        {
+            var runtimeFlows = rows
+                .Where(x => x.Active && x.LifecycleStatus == FlowLifecycleStatus.Published)
+                .GroupBy(x => x.FlowKey)
+                .Select(group => group.OrderByDescending(x => x.VersionNumber).First())
+                .Select(flow => FlowDefinitionMapper.ToDto(flow, mapper))
+                .ToList();
+
+            return Ok(runtimeFlows);
+        }
+
+        var builderFlows = rows
+            .GroupBy(x => x.FlowKey)
+            .Select(group =>
+            {
+                var draft = group.FirstOrDefault(x => x.LifecycleStatus == FlowLifecycleStatus.Draft);
+                var published = group.Where(x => x.LifecycleStatus == FlowLifecycleStatus.Published).OrderByDescending(x => x.VersionNumber).FirstOrDefault();
+                var selected = draft ?? published ?? group.OrderByDescending(x => x.VersionNumber).First();
+                return FlowDefinitionMapper.ToDto(selected, mapper, hasDraft: draft is not null && selected.Id != draft.Id ? true : draft is not null);
+            })
+            .OrderBy(x => x.Name)
+            .ToList();
+
+        return Ok(builderFlows);
     }
 
     [HttpGet("{id:guid}")]
@@ -39,7 +66,8 @@ public sealed class FlowsController : ControllerBase
             return NotFound();
         }
 
-        return Ok(FlowDefinitionMapper.ToDto(flow, mapper, includeTokenValues: true));
+        var hasDraft = await db.FlowDefinitions.AnyAsync(x => x.FlowKey == flow.FlowKey && x.LifecycleStatus == FlowLifecycleStatus.Draft && x.Id != flow.Id);
+        return Ok(FlowDefinitionMapper.ToDto(flow, mapper, includeTokenValues: true, hasDraft: hasDraft || flow.LifecycleStatus == FlowLifecycleStatus.Draft));
     }
 
     [HttpPost]
@@ -52,7 +80,13 @@ public sealed class FlowsController : ControllerBase
             return validation;
         }
 
-        var flow = new FlowDefinition();
+        var flow = new FlowDefinition
+        {
+            FlowKey = Guid.NewGuid(),
+            VersionNumber = 1,
+            LifecycleStatus = FlowLifecycleStatus.Draft
+        };
+
         FlowDefinitionMapper.Apply(flow, request);
 
         db.FlowDefinitions.Add(flow);
@@ -77,6 +111,11 @@ public sealed class FlowsController : ControllerBase
             return NotFound();
         }
 
+        if (flow.LifecycleStatus != FlowLifecycleStatus.Draft)
+        {
+            return Conflict(new { message = "Somente versões em rascunho podem ser alteradas. Gere um rascunho antes de editar." });
+        }
+
         db.StepFieldOptions.RemoveRange(flow.Steps.SelectMany(x => x.Fields).SelectMany(x => x.Options));
         db.StepFields.RemoveRange(flow.Steps.SelectMany(x => x.Fields));
         db.FlowSteps.RemoveRange(flow.Steps);
@@ -86,6 +125,125 @@ public sealed class FlowsController : ControllerBase
         await db.SaveChangesAsync();
 
         return Ok(new { flow.Id });
+    }
+
+    [HttpPost("{id:guid}/draft")]
+    [Authorize(Roles = "SuperAdmin")]
+    public async Task<ActionResult<object>> CreateDraft(Guid id, [FromServices] AppDbContext db)
+    {
+        var source = await LoadFlows(db).AsNoTracking().SingleOrDefaultAsync(x => x.Id == id);
+        if (source is null)
+        {
+            return NotFound();
+        }
+
+        var existingDraft = await LoadFlows(db).SingleOrDefaultAsync(x => x.FlowKey == source.FlowKey && x.LifecycleStatus == FlowLifecycleStatus.Draft);
+        if (existingDraft is not null)
+        {
+            return Ok(new { id = existingDraft.Id });
+        }
+
+        var nextVersion = await db.FlowDefinitions
+            .Where(x => x.FlowKey == source.FlowKey)
+            .MaxAsync(x => x.VersionNumber) + 1;
+
+        var draft = CloneVersion(source, FlowLifecycleStatus.Draft, nextVersion);
+        db.FlowDefinitions.Add(draft);
+        await db.SaveChangesAsync();
+
+        return Ok(new { id = draft.Id });
+    }
+
+    [HttpPost("{id:guid}/publish")]
+    [Authorize(Roles = "SuperAdmin")]
+    public async Task<ActionResult<object>> Publish(Guid id, [FromServices] AppDbContext db)
+    {
+        var draft = await LoadFlows(db).SingleOrDefaultAsync(x => x.Id == id);
+        if (draft is null)
+        {
+            return NotFound();
+        }
+
+        if (draft.LifecycleStatus != FlowLifecycleStatus.Draft)
+        {
+            return Conflict(new { message = "Apenas rascunhos podem ser publicados." });
+        }
+
+        var validation = ValidateDraftForPublish(draft);
+        if (validation is not null)
+        {
+            return validation;
+        }
+
+        var publishedVersions = await db.FlowDefinitions
+            .Where(x => x.FlowKey == draft.FlowKey && x.LifecycleStatus == FlowLifecycleStatus.Published)
+            .ToListAsync();
+
+        foreach (var published in publishedVersions)
+        {
+            published.LifecycleStatus = FlowLifecycleStatus.Archived;
+        }
+
+        draft.LifecycleStatus = FlowLifecycleStatus.Published;
+        draft.PublishedAt = DateTime.UtcNow;
+
+        await db.SaveChangesAsync();
+
+        return Ok(new { id = draft.Id });
+    }
+
+    private static FlowDefinition CloneVersion(FlowDefinition source, FlowLifecycleStatus status, int versionNumber)
+    {
+        return new FlowDefinition
+        {
+            FlowKey = source.FlowKey,
+            Name = source.Name,
+            Description = source.Description,
+            Active = source.Active,
+            VersionNumber = versionNumber,
+            LifecycleStatus = status,
+            PublishedAt = status == FlowLifecycleStatus.Published ? DateTime.UtcNow : null,
+            Tokens = source.Tokens.Select(token => new FlowToken
+            {
+                Name = token.Name,
+                Value = token.Value,
+                Type = token.Type,
+                HeaderName = token.HeaderName,
+                Active = token.Active
+            }).ToList(),
+            Steps = source.Steps
+                .OrderBy(x => x.Order)
+                .Select(step => new FlowStep
+                {
+                    Name = step.Name,
+                    Description = step.Description,
+                    Type = step.Type,
+                    Order = step.Order,
+                    AssignedUserId = step.AssignedUserId,
+                    ConfigurationJson = step.ConfigurationJson,
+                    Fields = step.Fields
+                        .OrderBy(x => x.Order)
+                        .Select(field => new StepField
+                        {
+                            Key = field.Key,
+                            Label = field.Label,
+                            Type = field.Type,
+                            Required = field.Required,
+                            Order = field.Order,
+                            Options = field.Options
+                                .OrderBy(x => x.Order)
+                                .Select(option => new StepFieldOption
+                                {
+                                    Label = option.Label,
+                                    Value = option.Value,
+                                    Order = option.Order
+                                })
+                                .ToList()
+                        })
+                        .ToList()
+                })
+                .ToList()
+        };
     }
 
     private static IQueryable<FlowDefinition> LoadFlows(AppDbContext db)
@@ -101,12 +259,12 @@ public sealed class FlowsController : ControllerBase
     {
         if (string.IsNullOrWhiteSpace(request.Name))
         {
-            return ValidationError(new Dictionary<string, string[]> { ["name"] = ["Nome do fluxo é obrigatório."] });
+            return ValidationError(new Dictionary<string, string[]> { ["name"] = ["Nome do fluxo e obrigatorio."] });
         }
 
         if (request.Steps.Count == 0)
         {
-            return ValidationError(new Dictionary<string, string[]> { ["steps"] = ["Ao menos uma etapa é obrigatória."] });
+            return ValidationError(new Dictionary<string, string[]> { ["steps"] = ["Ao menos uma etapa e obrigatoria."] });
         }
 
         var fieldKeys = request.Steps
@@ -117,7 +275,7 @@ public sealed class FlowsController : ControllerBase
 
         if (fieldKeys.Count != fieldKeys.Distinct().Count())
         {
-            return ValidationError(new Dictionary<string, string[]> { ["fields"] = ["As chaves dos campos devem ser únicas no fluxo inteiro."] });
+            return ValidationError(new Dictionary<string, string[]> { ["fields"] = ["As chaves dos campos devem ser unicas no fluxo inteiro."] });
         }
 
         foreach (var step in request.Steps)
@@ -131,6 +289,21 @@ public sealed class FlowsController : ControllerBase
             {
                 return ValidationError(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' precisa ter URL configurada."] });
             }
+        }
+
+        return null;
+    }
+
+    private ActionResult? ValidateDraftForPublish(FlowDefinition draft)
+    {
+        if (!draft.Steps.Any())
+        {
+            return ValidationError(new Dictionary<string, string[]> { ["steps"] = ["Nao e possivel publicar um fluxo sem etapas."] });
+        }
+
+        if (draft.Steps.Any(step => string.IsNullOrWhiteSpace(step.Name)))
+        {
+            return ValidationError(new Dictionary<string, string[]> { ["steps"] = ["Todas as etapas precisam estar nomeadas antes da publicacao."] });
         }
 
         return null;

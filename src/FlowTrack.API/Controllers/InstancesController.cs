@@ -74,7 +74,7 @@ public sealed class InstancesController : ControllerBase
         var flow = await db.FlowDefinitions
             .Include(x => x.Steps)
                 .ThenInclude(x => x.Fields)
-            .SingleOrDefaultAsync(x => x.Id == request.FlowDefinitionId && x.Active);
+            .SingleOrDefaultAsync(x => x.Id == request.FlowDefinitionId && x.Active && x.LifecycleStatus == FlowLifecycleStatus.Published);
 
         if (flow is null)
         {

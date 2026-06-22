@@ -14,7 +14,7 @@ public record FieldDto(Guid? Id, string Key, string Label, FieldType Type, bool 
 public record FlowTokenDto(Guid? Id, string Name, string? Value, TokenType Type, string? HeaderName, bool Active);
 public record StepApiConfigDto(string? Url, string? Method, string? TokenName, string? ScheduleMode, string? ScheduleValue, string? QueryTemplate, bool ValidateTls);
 public record StepDto(Guid? Id, string Name, string? Description, StepType Type, int Order, Guid? AssignedUserId, IReadOnlyList<FieldDto> Fields, StepApiConfigDto? ApiConfig);
-public record FlowDto(Guid Id, string Name, string Description, bool Active, IReadOnlyList<FlowTokenDto> Tokens, IReadOnlyList<StepDto> Steps);
+public record FlowDto(Guid Id, Guid FlowKey, string Name, string Description, bool Active, int VersionNumber, string LifecycleStatus, DateTime? PublishedAt, bool HasDraft, IReadOnlyList<FlowTokenDto> Tokens, IReadOnlyList<StepDto> Steps);
 public record SaveFlowRequest(string Name, string Description, bool Active, IReadOnlyList<FlowTokenDto> Tokens, IReadOnlyList<StepDto> Steps);
 public record CreateInstanceRequest(Guid FlowDefinitionId, string? Code, Dictionary<string, JsonElement> Data);
 public record AdvanceStepRequest(string? Notes);

@@ -7,13 +7,18 @@ namespace FlowTrack.API.Infrastructure;
 
 internal static class FlowDefinitionMapper
 {
-    public static FlowDto ToDto(FlowDefinition flow, IMapper mapper, bool includeTokenValues = false)
+    public static FlowDto ToDto(FlowDefinition flow, IMapper mapper, bool includeTokenValues = false, bool hasDraft = false)
     {
         return new FlowDto(
             flow.Id,
+            flow.FlowKey,
             flow.Name,
             flow.Description,
             flow.Active,
+            flow.VersionNumber,
+            flow.LifecycleStatus.ToString(),
+            flow.PublishedAt,
+            hasDraft,
             flow.Tokens
                 .OrderBy(x => x.Name)
                 .Select(x => new FlowTokenDto(x.Id, x.Name, includeTokenValues ? x.Value : null, x.Type, x.HeaderName, x.Active))
