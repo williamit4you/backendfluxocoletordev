@@ -6,7 +6,8 @@ namespace FlowTrack.Application;
 
 public record LoginRequest(string Email, string Password);
 public record LoginResponse(string Token, UserDto User);
-public record UserDto(Guid Id, string Name, string Email, string Role);
+public record UserDto(Guid Id, string Name, string Email, string Role, bool Active);
+public record CreateUserRequest(string Name, string Email, string Password, string Role);
 public record FieldDto(Guid? Id, string Key, string Label, FieldType Type, bool Required, int Order, string? OptionsJson);
 public record StepDto(Guid? Id, string Name, string? Description, StepType Type, int Order, Guid? AssignedUserId, string? ConfigurationJson);
 public record FlowDto(Guid Id, string Name, string Description, EntryType EntryType, bool Active, IReadOnlyList<FieldDto> Fields, IReadOnlyList<StepDto> Steps);

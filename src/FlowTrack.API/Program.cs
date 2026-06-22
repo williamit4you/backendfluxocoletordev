@@ -23,10 +23,46 @@ api.MapPost("/auth/login", async (LoginRequest req, AppDbContext db, IPasswordSe
     var email = req.Email.Trim().ToLowerInvariant();
     var user = await db.AppUsers.SingleOrDefaultAsync(x => x.Email == email && x.Active);
     if (user is null || !passwords.Verify(user, user.PasswordHash, req.Password)) return Results.Unauthorized();
-    return Results.Ok(new LoginResponse(tokens.Create(user), new UserDto(user.Id, user.Name, user.Email, user.Role.ToString())));
+    return Results.Ok(new LoginResponse(tokens.Create(user), new UserDto(user.Id, user.Name, user.Email, user.Role.ToString(), user.Active)));
 });
 
 var secured = api.MapGroup("").RequireAuthorization();
+secured.MapGet("/users", [Authorize(Roles = "SuperAdmin,Admin")] async (AppDbContext db) =>
+{
+    var users = await db.AppUsers.AsNoTracking().OrderBy(x => x.Name).Select(x => new UserDto(x.Id, x.Name, x.Email, x.Role.ToString(), x.Active)).ToListAsync();
+    return Results.Ok(users);
+});
+secured.MapPost("/users", [Authorize(Roles = "SuperAdmin,Admin")] async (CreateUserRequest req, ClaimsPrincipal principal, AppDbContext db, IPasswordService passwords) =>
+{
+    if (string.IsNullOrWhiteSpace(req.Name) || string.IsNullOrWhiteSpace(req.Email) || string.IsNullOrWhiteSpace(req.Password) || string.IsNullOrWhiteSpace(req.Role))
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["user"] = ["Nome, e-mail, senha e perfil são obrigatórios."] });
+
+    if (req.Password.Length < 8)
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["password"] = ["A senha deve ter ao menos 8 caracteres."] });
+
+    if (!Enum.TryParse<UserRole>(req.Role, true, out var role))
+        return Results.ValidationProblem(new Dictionary<string, string[]> { ["role"] = ["Perfil inválido."] });
+
+    var currentRole = principal.FindFirstValue(ClaimTypes.Role);
+    if (string.Equals(currentRole, UserRole.Admin.ToString(), StringComparison.OrdinalIgnoreCase) && role is UserRole.SuperAdmin)
+        return Results.Forbid();
+
+    var email = req.Email.Trim().ToLowerInvariant();
+    if (await db.AppUsers.AnyAsync(x => x.Email == email))
+        return Results.Conflict(new { message = "Já existe um usuário com este e-mail." });
+
+    var user = new AppUser
+    {
+        Name = req.Name.Trim(),
+        Email = email,
+        Role = role,
+        Active = true
+    };
+    user.PasswordHash = passwords.Hash(user, req.Password);
+    db.AppUsers.Add(user);
+    await db.SaveChangesAsync();
+    return Results.Created($"/api/users/{user.Id}", new UserDto(user.Id, user.Name, user.Email, user.Role.ToString(), user.Active));
+});
 secured.MapGet("/flows", async (AppDbContext db, IMapper mapper) =>
 {
     var flows = await db.FlowDefinitions.AsNoTracking().Include(x => x.Fields).Include(x => x.Steps).OrderBy(x => x.Name).ToListAsync();
