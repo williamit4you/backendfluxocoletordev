@@ -1,0 +1,94 @@
+# FlowTrack backend (.NET 8)
+
+# Build outputs
+[Bb]in/
+[Oo]bj/
+[Oo]ut/
+[Aa]rtifacts/
+publish/
+
+# Visual Studio / MSBuild
+.vs/
+*.user
+*.rsuser
+*.suo
+*.userosscache
+*.sln.docstates
+*.csproj.user
+*.pubxml
+*.publishproj
+*.publish.xml
+
+# JetBrains Rider / ReSharper
+.idea/
+*.sln.iml
+_ReSharper*/
+*.DotSettings.user
+
+# VS Code local settings
+.vscode/
+
+# Test results and coverage
+[Tt]est[Rr]esult*/
+[Tt]est[Rr]esults/
+coverage/
+coverage.*
+*.coverage
+*.coveragexml
+*.trx
+
+# NuGet packages and generated files
+*.nupkg
+*.snupkg
+packages/
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+appsettings.json
+appsettings.*.json
+!appsettings.example.json
+!appsettings.*.example.json
+secrets.json
+
+# Certificates, private keys and signing files
+*.pfx
+*.p12
+*.pem
+*.key
+*.snk
+
+# Logs, dumps and local databases
+*.log
+logs/
+*.dmp
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Docker Compose local overrides and volumes
+docker-compose.override.yml
+docker-compose.override.yaml
+.docker/
+volumes/
+
+# Operating system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Temporary and backup files
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
+
