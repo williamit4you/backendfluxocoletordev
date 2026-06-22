@@ -16,6 +16,9 @@ public record StepApiConfigDto(string? Url, string? Method, string? TokenName, s
 public record StepDto(Guid? Id, string Name, string? Description, StepType Type, int Order, Guid? AssignedUserId, IReadOnlyList<FieldDto> Fields, StepApiConfigDto? ApiConfig);
 public record FlowDto(Guid Id, Guid FlowKey, string Name, string Description, bool Active, int VersionNumber, string LifecycleStatus, DateTime? PublishedAt, bool HasDraft, IReadOnlyList<FlowTokenDto> Tokens, IReadOnlyList<StepDto> Steps);
 public record SaveFlowRequest(string Name, string Description, bool Active, IReadOnlyList<FlowTokenDto> Tokens, IReadOnlyList<StepDto> Steps);
+public record IntegrationAttemptDto(Guid Id, string TriggerType, string Method, string Url, int? ResponseStatusCode, bool Success, int DurationMs, DateTime CreatedAt, string? ResponsePreview, string? ErrorMessage);
+public record IntegrationTestRequest(Dictionary<string, JsonElement> Data);
+public record IntegrationTestResponse(bool Success, int? StatusCode, int DurationMs, string Url, string Method, string? ResponsePreview, string? ErrorMessage);
 public record CreateInstanceRequest(Guid FlowDefinitionId, string? Code, Dictionary<string, JsonElement> Data);
 public record AdvanceStepRequest(string? Notes);
 public record StepProgressDto(Guid Id, string Name, int Order, StepType Type, StepStatus Status, DateTime? StartedAt, DateTime? CompletedAt);
@@ -34,6 +37,17 @@ public interface IAppDbContext
 public interface ITokenService { string Create(AppUser user); }
 public interface IPasswordService { string Hash(AppUser user, string password); bool Verify(AppUser user, string hash, string password); }
 public interface IPdfExtractionService { Task<PdfExtractionDto> ExtractAsync(Stream stream, CancellationToken cancellationToken); }
+public interface IIntegrationExecutionService
+{
+    Task<IntegrationTestResponse> ExecuteAsync(
+        FlowDefinition flow,
+        FlowStep step,
+        Dictionary<string, JsonElement> data,
+        CancellationToken cancellationToken,
+        FlowInstance? instance = null,
+        StepExecution? stepExecution = null,
+        IntegrationTriggerType triggerType = IntegrationTriggerType.Runtime);
+}
 
 public sealed class MappingProfile : Profile
 {

@@ -52,14 +52,7 @@ public sealed class InstancesController : ControllerBase
     [HttpGet("{id:guid}")]
     public async Task<ActionResult<InstanceDto>> GetById(Guid id, [FromServices] AppDbContext db)
     {
-        var item = await db.FlowInstances
-            .AsNoTracking()
-            .Include(x => x.FlowDefinition)
-                .ThenInclude(x => x.Steps)
-            .Include(x => x.StepExecutions)
-                .ThenInclude(x => x.FlowStep)
-            .SingleOrDefaultAsync(x => x.Id == id);
-
+        var item = await LoadInstance(db).AsNoTracking().SingleOrDefaultAsync(x => x.Id == id);
         if (item is null)
         {
             return NotFound();
@@ -69,9 +62,13 @@ public sealed class InstancesController : ControllerBase
     }
 
     [HttpPost]
-    public async Task<ActionResult<object>> Create([FromBody] CreateInstanceRequest request, [FromServices] AppDbContext db)
+    public async Task<ActionResult<object>> Create(
+        [FromBody] CreateInstanceRequest request,
+        [FromServices] AppDbContext db,
+        [FromServices] IIntegrationExecutionService integrations)
     {
         var flow = await db.FlowDefinitions
+            .Include(x => x.Tokens)
             .Include(x => x.Steps)
                 .ThenInclude(x => x.Fields)
             .SingleOrDefaultAsync(x => x.Id == request.FlowDefinitionId && x.Active && x.LifecycleStatus == FlowLifecycleStatus.Published);
@@ -124,6 +121,7 @@ public sealed class InstancesController : ControllerBase
 
         db.FlowInstances.Add(instance);
         await db.SaveChangesAsync();
+        await ProcessAutomaticStepsAsync(instance.Id, db, integrations, HttpContext.RequestAborted);
 
         return Created($"/api/instances/{instance.Id}", new { instance.Id });
     }
@@ -132,13 +130,10 @@ public sealed class InstancesController : ControllerBase
     public async Task<IActionResult> Advance(
         Guid id,
         [FromBody] AdvanceStepRequest request,
-        [FromServices] AppDbContext db)
+        [FromServices] AppDbContext db,
+        [FromServices] IIntegrationExecutionService integrations)
     {
-        var item = await db.FlowInstances
-            .Include(x => x.StepExecutions)
-                .ThenInclude(x => x.FlowStep)
-            .SingleOrDefaultAsync(x => x.Id == id);
-
+        var item = await LoadInstance(db).SingleOrDefaultAsync(x => x.Id == id);
         if (item is null)
         {
             return NotFound();
@@ -146,7 +141,7 @@ public sealed class InstancesController : ControllerBase
 
         if (item.Status != InstanceStatus.InProgress)
         {
-            return Conflict(new { message = "Execução não está em andamento." });
+            return Conflict(new { message = "Execucao nao esta em andamento." });
         }
 
         var current = item.StepExecutions.SingleOrDefault(x => x.Status == StepStatus.InProgress);
@@ -155,15 +150,50 @@ public sealed class InstancesController : ControllerBase
             return Conflict(new { message = "Nenhuma etapa ativa encontrada." });
         }
 
+        if (current.FlowStep.Type == StepType.ApiSend || current.FlowStep.Type == StepType.ApiQuery || current.FlowStep.Type == StepType.Automatic)
+        {
+            return Conflict(new { message = "A etapa atual eh automatica. Use o retry de integracao se necessario." });
+        }
+
+        CompleteCurrentStep(item, current, request.Notes, TryGetCurrentUserId());
+        await db.SaveChangesAsync();
+        await ProcessAutomaticStepsAsync(item.Id, db, integrations, HttpContext.RequestAborted);
+
+        return NoContent();
+    }
+
+    [HttpPost("{id:guid}/retry-integration")]
+    public async Task<ActionResult<InstanceDto>> RetryIntegration(
+        Guid id,
+        [FromServices] AppDbContext db,
+        [FromServices] IIntegrationExecutionService integrations)
+    {
+        var item = await LoadInstance(db).SingleOrDefaultAsync(x => x.Id == id);
+        if (item is null)
+        {
+            return NotFound();
+        }
+
+        await ProcessAutomaticStepsAsync(item.Id, db, integrations, HttpContext.RequestAborted, forceFailedCurrent: true);
+
+        var reloaded = await LoadInstance(db).AsNoTracking().SingleAsync(x => x.Id == id);
+        return Ok(ToDto(reloaded));
+    }
+
+    private Guid? TryGetCurrentUserId()
+    {
+        return Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier) ?? User.FindFirstValue("sub"), out var userId)
+            ? userId
+            : null;
+    }
+
+    private static void CompleteCurrentStep(FlowInstance item, StepExecution current, string? notes, Guid? completedByUserId)
+    {
         var now = DateTime.UtcNow;
         current.Status = StepStatus.Completed;
         current.CompletedAt = now;
-        current.Notes = request.Notes;
-
-        if (Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier) ?? User.FindFirstValue("sub"), out var userId))
-        {
-            current.CompletedByUserId = userId;
-        }
+        current.Notes = notes;
+        current.CompletedByUserId = completedByUserId;
 
         var next = item.StepExecutions
             .Where(x => x.FlowStep.Order > current.FlowStep.Order)
@@ -176,15 +206,81 @@ public sealed class InstancesController : ControllerBase
         }
         else
         {
-            next.Status = StepStatus.InProgress;
-            next.StartedAt = now;
+            next.Status = next.Status == StepStatus.Failed ? StepStatus.InProgress : StepStatus.InProgress;
+            next.StartedAt ??= now;
             item.CurrentStepOrder = next.FlowStep.Order;
         }
 
         item.UpdatedAt = now;
-        await db.SaveChangesAsync();
+    }
 
-        return NoContent();
+    private static IQueryable<FlowInstance> LoadInstance(AppDbContext db)
+    {
+        return db.FlowInstances
+            .Include(x => x.FlowDefinition)
+                .ThenInclude(x => x.Tokens)
+            .Include(x => x.FlowDefinition)
+                .ThenInclude(x => x.Steps)
+            .Include(x => x.StepExecutions)
+                .ThenInclude(x => x.FlowStep);
+    }
+
+    private static async Task ProcessAutomaticStepsAsync(
+        Guid instanceId,
+        AppDbContext db,
+        IIntegrationExecutionService integrations,
+        CancellationToken cancellationToken,
+        bool forceFailedCurrent = false)
+    {
+        while (true)
+        {
+            var item = await LoadInstance(db).SingleAsync(x => x.Id == instanceId, cancellationToken);
+            if (item.Status != InstanceStatus.InProgress)
+            {
+                return;
+            }
+
+            var current = item.StepExecutions.SingleOrDefault(x => x.Status == StepStatus.InProgress || (forceFailedCurrent && x.Status == StepStatus.Failed));
+            if (current is null)
+            {
+                return;
+            }
+
+            if (current.Status == StepStatus.Failed && forceFailedCurrent)
+            {
+                current.Status = StepStatus.InProgress;
+            }
+
+            var currentData = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(item.DataJson) ?? [];
+            var stepType = current.FlowStep.Type;
+
+            if (stepType == StepType.Automatic)
+            {
+                CompleteCurrentStep(item, current, "Etapa automatica concluida pelo sistema.", null);
+                await db.SaveChangesAsync(cancellationToken);
+                forceFailedCurrent = false;
+                continue;
+            }
+
+            if (stepType != StepType.ApiSend && stepType != StepType.ApiQuery)
+            {
+                return;
+            }
+
+            var result = await integrations.ExecuteAsync(item.FlowDefinition, current.FlowStep, currentData, cancellationToken, item, current, IntegrationTriggerType.Runtime);
+            if (!result.Success)
+            {
+                current.Status = StepStatus.Failed;
+                current.Notes = result.ErrorMessage ?? "Falha na integracao.";
+                item.UpdatedAt = DateTime.UtcNow;
+                await db.SaveChangesAsync(cancellationToken);
+                return;
+            }
+
+            CompleteCurrentStep(item, current, "Etapa de integracao concluida automaticamente.", null);
+            await db.SaveChangesAsync(cancellationToken);
+            forceFailedCurrent = false;
+        }
     }
 
     private static InstanceDto ToDto(FlowInstance item)

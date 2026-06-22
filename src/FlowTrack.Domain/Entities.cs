@@ -8,6 +8,7 @@ public enum InstanceStatus { InProgress, Completed, Cancelled }
 public enum StepStatus { Pending, InProgress, Completed, Failed }
 public enum TokenType { Bearer, ApiKey }
 public enum FlowLifecycleStatus { Draft, Published, Archived }
+public enum IntegrationTriggerType { Runtime, Test }
 
 public abstract class Entity { public Guid Id { get; set; } = Guid.NewGuid(); }
 
@@ -86,6 +87,7 @@ public sealed class FlowInstance : Entity
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
     public List<StepExecution> StepExecutions { get; set; } = [];
+    public List<IntegrationAttempt> IntegrationAttempts { get; set; } = [];
 }
 
 public sealed class StepExecution : Entity
@@ -98,4 +100,20 @@ public sealed class StepExecution : Entity
     public DateTime? CompletedAt { get; set; }
     public Guid? CompletedByUserId { get; set; }
     public string? Notes { get; set; }
+}
+
+public sealed class IntegrationAttempt : Entity
+{
+    public Guid? FlowInstanceId { get; set; }
+    public Guid FlowStepId { get; set; }
+    public Guid? StepExecutionId { get; set; }
+    public IntegrationTriggerType TriggerType { get; set; }
+    public string Method { get; set; } = "";
+    public string Url { get; set; } = "";
+    public int? ResponseStatusCode { get; set; }
+    public bool Success { get; set; }
+    public int DurationMs { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public string? ResponsePreview { get; set; }
+    public string? ErrorMessage { get; set; }
 }

@@ -8,10 +8,14 @@ using FlowTrack.Domain;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Configuration;
 using Microsoft.IdentityModel.Tokens;
 using UglyToad.PdfPig;
+using System.Diagnostics;
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
+using System.Text.Json;
 
 namespace FlowTrack.IoC;
 
@@ -28,6 +32,10 @@ public static class DependencyInjection
         services.AddScoped<IPasswordService, PasswordService>();
         services.AddScoped<ITokenService, TokenService>();
         services.AddScoped<IPdfExtractionService, PdfExtractionService>();
+        services.AddHttpClient<IIntegrationExecutionService, IntegrationExecutionService>(client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(30);
+        });
         services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer(o =>
         {
             o.TokenValidationParameters = new TokenValidationParameters
@@ -40,6 +48,181 @@ public static class DependencyInjection
         });
         services.AddAuthorization();
         return services;
+    }
+}
+
+internal sealed class IntegrationExecutionService(HttpClient httpClient, AppDbContext db) : IIntegrationExecutionService
+{
+    public async Task<IntegrationTestResponse> ExecuteAsync(
+        FlowDefinition flow,
+        FlowStep step,
+        Dictionary<string, JsonElement> data,
+        CancellationToken cancellationToken,
+        FlowInstance? instance = null,
+        StepExecution? stepExecution = null,
+        IntegrationTriggerType triggerType = IntegrationTriggerType.Runtime)
+    {
+        var config = string.IsNullOrWhiteSpace(step.ConfigurationJson)
+            ? null
+            : JsonSerializer.Deserialize<StepApiConfigDto>(step.ConfigurationJson);
+
+        if (config is null || string.IsNullOrWhiteSpace(config.Url))
+        {
+            return await SaveAttemptAsync(step, triggerType, "GET", "", false, null, 0, null, "Etapa sem configuracao de integracao.", instance, stepExecution, cancellationToken);
+        }
+
+        var method = ResolveMethod(step.Type, config.Method);
+        var resolvedUrl = ResolveTemplate(config.Url, data);
+        if (step.Type == StepType.ApiQuery && !string.IsNullOrWhiteSpace(config.QueryTemplate))
+        {
+            resolvedUrl = $"{resolvedUrl}{ResolveTemplate(config.QueryTemplate, data)}";
+        }
+
+        using var request = new HttpRequestMessage(new HttpMethod(method), resolvedUrl);
+        ApplyToken(flow, config, resolvedUrl, request);
+
+        if (step.Type == StepType.ApiSend)
+        {
+            request.Content = JsonContent.Create(data);
+        }
+
+        var watch = Stopwatch.StartNew();
+
+        try
+        {
+            using var response = await httpClient.SendAsync(request, cancellationToken);
+            watch.Stop();
+
+            var responseText = await response.Content.ReadAsStringAsync(cancellationToken);
+            var preview = Truncate(responseText);
+            var success = response.IsSuccessStatusCode;
+
+            return await SaveAttemptAsync(
+                step,
+                triggerType,
+                method,
+                resolvedUrl,
+                success,
+                (int)response.StatusCode,
+                (int)watch.ElapsedMilliseconds,
+                preview,
+                success ? null : $"Resposta HTTP {(int)response.StatusCode}.",
+                instance,
+                stepExecution,
+                cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            watch.Stop();
+            return await SaveAttemptAsync(
+                step,
+                triggerType,
+                method,
+                resolvedUrl,
+                false,
+                null,
+                (int)watch.ElapsedMilliseconds,
+                null,
+                Truncate(ex.Message, 400),
+                instance,
+                stepExecution,
+                cancellationToken);
+        }
+    }
+
+    private static string ResolveMethod(StepType type, string? configuredMethod)
+    {
+        if (type == StepType.ApiQuery)
+        {
+            return "GET";
+        }
+
+        if (string.Equals(configuredMethod, "PUT", StringComparison.OrdinalIgnoreCase))
+        {
+            return "PUT";
+        }
+
+        return "POST";
+    }
+
+    private static string ResolveTemplate(string template, Dictionary<string, JsonElement> data)
+    {
+        var result = template;
+        foreach (var entry in data)
+        {
+            result = result.Replace($"{{{{{entry.Key}}}}}", entry.Value.ToString(), StringComparison.OrdinalIgnoreCase);
+            result = result.Replace($"{{{{steps.current.fields.{entry.Key}}}}}", entry.Value.ToString(), StringComparison.OrdinalIgnoreCase);
+        }
+
+        return result;
+    }
+
+    private static string Truncate(string? value, int max = 1200)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        return value.Length <= max ? value : value[..max];
+    }
+
+    private void ApplyToken(FlowDefinition flow, StepApiConfigDto config, string resolvedUrl, HttpRequestMessage request)
+    {
+        if (string.IsNullOrWhiteSpace(config.TokenName))
+        {
+            return;
+        }
+
+        var token = flow.Tokens.FirstOrDefault(x => x.Active && string.Equals(x.Name, config.TokenName, StringComparison.OrdinalIgnoreCase));
+        if (token is null || string.IsNullOrWhiteSpace(token.Value))
+        {
+            return;
+        }
+
+        if (token.Type == TokenType.Bearer)
+        {
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token.Value);
+            return;
+        }
+
+        var header = string.IsNullOrWhiteSpace(token.HeaderName) ? "X-API-Key" : token.HeaderName;
+        request.Headers.TryAddWithoutValidation(header, token.Value);
+    }
+
+    private async Task<IntegrationTestResponse> SaveAttemptAsync(
+        FlowStep step,
+        IntegrationTriggerType triggerType,
+        string method,
+        string url,
+        bool success,
+        int? statusCode,
+        int durationMs,
+        string? preview,
+        string? error,
+        FlowInstance? instance,
+        StepExecution? stepExecution,
+        CancellationToken cancellationToken)
+    {
+        var attempt = new IntegrationAttempt
+        {
+            FlowInstanceId = instance?.Id,
+            FlowStepId = step.Id,
+            StepExecutionId = stepExecution?.Id,
+            TriggerType = triggerType,
+            Method = method,
+            Url = Truncate(url, 1900),
+            Success = success,
+            ResponseStatusCode = statusCode,
+            DurationMs = durationMs,
+            ResponsePreview = Truncate(preview),
+            ErrorMessage = string.IsNullOrWhiteSpace(error) ? null : Truncate(error, 900)
+        };
+
+        db.IntegrationAttempts.Add(attempt);
+        await db.SaveChangesAsync(cancellationToken);
+
+        return new IntegrationTestResponse(success, statusCode, durationMs, attempt.Url, method, attempt.ResponsePreview, attempt.ErrorMessage);
     }
 }
 

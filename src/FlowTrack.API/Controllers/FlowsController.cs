@@ -192,6 +192,36 @@ public sealed class FlowsController : ControllerBase
         return Ok(new { id = draft.Id });
     }
 
+    [HttpPost("{id:guid}/steps/{stepId:guid}/test-integration")]
+    [Authorize(Roles = "SuperAdmin")]
+    public async Task<ActionResult<IntegrationTestResponse>> TestIntegration(
+        Guid id,
+        Guid stepId,
+        [FromBody] IntegrationTestRequest request,
+        [FromServices] AppDbContext db,
+        [FromServices] IIntegrationExecutionService integrations)
+    {
+        var flow = await LoadFlows(db).SingleOrDefaultAsync(x => x.Id == id);
+        if (flow is null)
+        {
+            return NotFound();
+        }
+
+        var step = flow.Steps.SingleOrDefault(x => x.Id == stepId);
+        if (step is null)
+        {
+            return NotFound();
+        }
+
+        if (step.Type != StepType.ApiSend && step.Type != StepType.ApiQuery)
+        {
+            return BadRequest(new { message = "Esta etapa nao possui integracao de API para teste." });
+        }
+
+        var result = await integrations.ExecuteAsync(flow, step, request.Data, HttpContext.RequestAborted, triggerType: IntegrationTriggerType.Test);
+        return Ok(result);
+    }
+
     private static FlowDefinition CloneVersion(FlowDefinition source, FlowLifecycleStatus status, int versionNumber)
     {
         return new FlowDefinition
