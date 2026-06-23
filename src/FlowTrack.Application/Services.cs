@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using AutoMapper;
 using FlowTrack.Domain;
 using Microsoft.EntityFrameworkCore;
@@ -236,7 +237,7 @@ public sealed class FlowManagementService(
                 Type = step.Type,
                 Order = stepIndex + 1,
                 AssignedUserId = step.AssignedUserId,
-                ConfigurationJson = step.ApiConfig is null ? null : JsonSerializer.Serialize(step.ApiConfig),
+                ConfigurationJson = step.ApiConfig is null ? null : JsonSerializer.Serialize(NormalizeApiConfig(step.ApiConfig)),
                 Fields = step.Fields
                     .Where(x => !string.IsNullOrWhiteSpace(x.Label) && !string.IsNullOrWhiteSpace(x.Key))
                     .Select((field, fieldIndex) => new StepField
@@ -269,7 +270,114 @@ public sealed class FlowManagementService(
             return null;
         }
 
-        return JsonSerializer.Deserialize<StepApiConfigDto>(json);
+        var config = JsonSerializer.Deserialize<StepApiConfigDto>(json);
+        return config is null ? null : NormalizeApiConfig(config);
+    }
+
+    private static void ValidateApiConfig(StepDto step)
+    {
+        if (step.ApiConfig is null)
+        {
+            return;
+        }
+
+        var scheduleMode = (step.ApiConfig.ScheduleMode ?? "manual").Trim().ToLowerInvariant();
+        if (scheduleMode is not ("manual" or "interval" or "cron"))
+        {
+            throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' possui um modo de agendamento invalido. Use manual, interval ou cron."] });
+        }
+
+        if (scheduleMode == "interval")
+        {
+            if (!TryParseIntervalMinutes(step.ApiConfig.ScheduleValue, out var minutes))
+            {
+                throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' precisa de um intervalo valido. Exemplos aceitos: '5 minutos', '15 minutos', '60 minutos' ou apenas '30'."] });
+            }
+
+            if (minutes < 1 || minutes > 10080)
+            {
+                throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' precisa ter intervalo entre 1 minuto e 10080 minutos (7 dias)."] });
+            }
+        }
+
+        if (scheduleMode == "cron" && !IsValidCronExpression(step.ApiConfig.ScheduleValue))
+        {
+            throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' precisa de uma expressao cron valida com 5 partes. Exemplo: '*/30 * * * *'."] });
+        }
+    }
+
+    private static StepApiConfigDto NormalizeApiConfig(StepApiConfigDto config)
+    {
+        var scheduleMode = string.IsNullOrWhiteSpace(config.ScheduleMode) ? "manual" : config.ScheduleMode.Trim().ToLowerInvariant();
+        string? scheduleValue = null;
+        StepScheduleAssistDto? assist;
+
+        if (scheduleMode == "interval" && TryParseIntervalMinutes(config.ScheduleValue, out var minutes))
+        {
+            scheduleValue = $"{minutes} minutos";
+            assist = new StepScheduleAssistDto(minutes, null, $"Execucao recorrente a cada {minutes} minuto(s).");
+        }
+        else if (scheduleMode == "cron" && IsValidCronExpression(config.ScheduleValue))
+        {
+            scheduleValue = config.ScheduleValue!.Trim();
+            assist = new StepScheduleAssistDto(null, scheduleValue, $"Expressao cron validada: {scheduleValue}.");
+        }
+        else
+        {
+            scheduleMode = "manual";
+            assist = new StepScheduleAssistDto(null, null, "Execucao manual, sem agendamento automatico.");
+        }
+
+        return config with
+        {
+            Url = string.IsNullOrWhiteSpace(config.Url) ? null : config.Url.Trim(),
+            Method = string.IsNullOrWhiteSpace(config.Method) ? null : config.Method.Trim().ToUpperInvariant(),
+            TokenName = string.IsNullOrWhiteSpace(config.TokenName) ? null : config.TokenName.Trim(),
+            ScheduleMode = scheduleMode,
+            ScheduleValue = scheduleValue,
+            QueryTemplate = string.IsNullOrWhiteSpace(config.QueryTemplate) ? null : config.QueryTemplate.Trim(),
+            SendFieldKeys = config.SendFieldKeys?.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
+            ResponseMappings = config.ResponseMappings?.Where(x => !string.IsNullOrWhiteSpace(x.FieldKey) && !string.IsNullOrWhiteSpace(x.ResponsePath)).Select(x => new ResponseFieldMappingDto(x.FieldKey.Trim(), x.ResponsePath.Trim())).ToList(),
+            BodyMappings = config.BodyMappings?.Where(x => !string.IsNullOrWhiteSpace(x.TargetKey) && !string.IsNullOrWhiteSpace(x.SourceReference)).Select(x => new BodyFieldMappingDto(x.TargetKey.Trim(), x.SourceReference.Trim())).ToList(),
+            ScheduleAssist = assist
+        };
+    }
+
+    private static bool TryParseIntervalMinutes(string? value, out int minutes)
+    {
+        minutes = 0;
+
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        var trimmed = value.Trim().ToLowerInvariant();
+        if (int.TryParse(trimmed, out minutes))
+        {
+            return true;
+        }
+
+        var match = Regex.Match(trimmed, @"^(?<amount>\d+)\s*(min|mins|minuto|minutos|h|hr|hora|horas)?$");
+        if (!match.Success || !int.TryParse(match.Groups["amount"].Value, out var amount))
+        {
+            return false;
+        }
+
+        var unit = match.Groups[2].Value;
+        minutes = unit is "h" or "hr" or "hora" or "horas" ? amount * 60 : amount;
+        return true;
+    }
+
+    private static bool IsValidCronExpression(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        var parts = value.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        return parts.Length == 5 && parts.All(part => Regex.IsMatch(part, @"^[\d\*/,\-]+$"));
     }
 
     private static FlowDefinition CloneVersion(FlowDefinition source, FlowLifecycleStatus status, int versionNumber)
@@ -361,6 +469,8 @@ public sealed class FlowManagementService(
             {
                 throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' precisa ter URL configurada."] });
             }
+
+            ValidateApiConfig(step);
 
             foreach (var field in step.Fields)
             {
