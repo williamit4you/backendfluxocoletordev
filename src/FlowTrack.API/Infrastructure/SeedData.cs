@@ -62,7 +62,7 @@ internal static class SeedData
                             new() { Key = "observacoes", Label = "Observações", Type = FieldType.Text, Required = false, Order = 12 }
                         ]
                     },
-                    new() { Name = "Saída para Sandra", Type = StepType.UserTask, Order = 2 },
+                    new() { Name = "Saída", Type = StepType.UserTask, Order = 2 },
                     new() { Name = "Entrada no Alvo / ERP", Type = StepType.ExternalMonitor, Order = 3 },
                     new() { Name = "Entrada na sala de inspeção", Type = StepType.ExternalMonitor, Order = 4 },
                     new() { Name = "Lote aprovado", Type = StepType.ExternalMonitor, Order = 5 },
