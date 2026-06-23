@@ -1,346 +1,132 @@
-using AutoMapper;
-using FlowTrack.API.Infrastructure;
 using FlowTrack.Application;
-using FlowTrack.Data;
-using FlowTrack.Domain;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
 
 namespace FlowTrack.API.Controllers;
 
 [ApiController]
 [Authorize]
 [Route("api/flows")]
-public sealed class FlowsController : ControllerBase
+public sealed class FlowsController(IFlowManagementService flows) : ControllerBase
 {
     [HttpGet]
-    public async Task<ActionResult<IReadOnlyList<FlowDto>>> GetAll(
-        [FromQuery] string? scope,
-        [FromServices] AppDbContext db,
-        [FromServices] IMapper mapper)
+    public async Task<ActionResult<IReadOnlyList<FlowDto>>> GetAll([FromQuery] string? scope)
     {
-        var normalizedScope = string.Equals(scope, "builder", StringComparison.OrdinalIgnoreCase) ? "builder" : "runtime";
-        var rows = await LoadFlows(db)
-            .AsNoTracking()
-            .OrderBy(x => x.Name)
-            .ThenByDescending(x => x.VersionNumber)
-            .ToListAsync();
-
-        if (normalizedScope == "runtime")
-        {
-            var runtimeFlows = rows
-                .Where(x => x.Active && x.LifecycleStatus == FlowLifecycleStatus.Published)
-                .GroupBy(x => x.FlowKey)
-                .Select(group => group.OrderByDescending(x => x.VersionNumber).First())
-                .Select(flow => FlowDefinitionMapper.ToDto(flow, mapper))
-                .ToList();
-
-            return Ok(runtimeFlows);
-        }
-
-        var builderFlows = rows
-            .GroupBy(x => x.FlowKey)
-            .Select(group =>
-            {
-                var draft = group.FirstOrDefault(x => x.LifecycleStatus == FlowLifecycleStatus.Draft);
-                var published = group.Where(x => x.LifecycleStatus == FlowLifecycleStatus.Published).OrderByDescending(x => x.VersionNumber).FirstOrDefault();
-                var selected = draft ?? published ?? group.OrderByDescending(x => x.VersionNumber).First();
-                return FlowDefinitionMapper.ToDto(selected, mapper, hasDraft: draft is not null && selected.Id != draft.Id ? true : draft is not null);
-            })
-            .OrderBy(x => x.Name)
-            .ToList();
-
-        return Ok(builderFlows);
+        var result = await flows.GetAllAsync(scope, HttpContext.RequestAborted);
+        return Ok(result);
     }
 
     [HttpGet("{id:guid}")]
-    public async Task<ActionResult<FlowDto>> GetById(
-        Guid id,
-        [FromServices] AppDbContext db,
-        [FromServices] IMapper mapper)
+    public async Task<ActionResult<FlowDto>> GetById(Guid id)
     {
-        var flow = await LoadFlows(db).AsNoTracking().SingleOrDefaultAsync(x => x.Id == id);
-        if (flow is null)
+        try
+        {
+            return Ok(await flows.GetByIdAsync(id, HttpContext.RequestAborted));
+        }
+        catch (AppNotFoundException)
         {
             return NotFound();
         }
-
-        var hasDraft = await db.FlowDefinitions.AnyAsync(x => x.FlowKey == flow.FlowKey && x.LifecycleStatus == FlowLifecycleStatus.Draft && x.Id != flow.Id);
-        return Ok(FlowDefinitionMapper.ToDto(flow, mapper, includeTokenValues: true, hasDraft: hasDraft || flow.LifecycleStatus == FlowLifecycleStatus.Draft));
     }
 
     [HttpPost]
     [Authorize(Roles = "SuperAdmin")]
-    public async Task<ActionResult<object>> Create([FromBody] SaveFlowRequest request, [FromServices] AppDbContext db)
+    public async Task<ActionResult<object>> Create([FromBody] SaveFlowRequest request)
     {
-        var validation = Validate(request);
-        if (validation is not null)
+        try
         {
-            return validation;
+            var id = await flows.CreateAsync(request, TryGetCurrentUserId(), HttpContext.RequestAborted);
+            return Created($"/api/flows/{id}", new { Id = id });
         }
-
-        var flow = new FlowDefinition
+        catch (AppValidationException ex)
         {
-            FlowKey = Guid.NewGuid(),
-            VersionNumber = 1,
-            LifecycleStatus = FlowLifecycleStatus.Draft
-        };
-
-        FlowDefinitionMapper.Apply(flow, request);
-
-        db.FlowDefinitions.Add(flow);
-        await db.SaveChangesAsync();
-
-        return Created($"/api/flows/{flow.Id}", new { flow.Id });
+            return BadRequest(new ValidationProblemDetails(ex.Errors));
+        }
     }
 
     [HttpPut("{id:guid}")]
     [Authorize(Roles = "SuperAdmin")]
-    public async Task<ActionResult<object>> Update(Guid id, [FromBody] SaveFlowRequest request, [FromServices] AppDbContext db)
+    public async Task<ActionResult<object>> Update(Guid id, [FromBody] SaveFlowRequest request)
     {
-        var validation = Validate(request);
-        if (validation is not null)
+        try
         {
-            return validation;
+            var updatedId = await flows.UpdateAsync(id, request, TryGetCurrentUserId(), HttpContext.RequestAborted);
+            return Ok(new { Id = updatedId });
         }
-
-        var flow = await LoadFlows(db).SingleOrDefaultAsync(x => x.Id == id);
-        if (flow is null)
+        catch (AppValidationException ex)
+        {
+            return BadRequest(new ValidationProblemDetails(ex.Errors));
+        }
+        catch (AppNotFoundException)
         {
             return NotFound();
         }
-
-        if (flow.LifecycleStatus != FlowLifecycleStatus.Draft)
+        catch (AppConflictException ex)
         {
-            return Conflict(new { message = "Somente versões em rascunho podem ser alteradas. Gere um rascunho antes de editar." });
+            return Conflict(new { message = ex.Message });
         }
-
-        db.StepFieldOptions.RemoveRange(flow.Steps.SelectMany(x => x.Fields).SelectMany(x => x.Options));
-        db.StepFields.RemoveRange(flow.Steps.SelectMany(x => x.Fields));
-        db.FlowSteps.RemoveRange(flow.Steps);
-        db.FlowTokens.RemoveRange(flow.Tokens);
-
-        FlowDefinitionMapper.Apply(flow, request);
-        await db.SaveChangesAsync();
-
-        return Ok(new { flow.Id });
     }
 
     [HttpPost("{id:guid}/draft")]
     [Authorize(Roles = "SuperAdmin")]
-    public async Task<ActionResult<object>> CreateDraft(Guid id, [FromServices] AppDbContext db)
+    public async Task<ActionResult<object>> CreateDraft(Guid id)
     {
-        var source = await LoadFlows(db).AsNoTracking().SingleOrDefaultAsync(x => x.Id == id);
-        if (source is null)
+        try
+        {
+            var draftId = await flows.CreateDraftAsync(id, TryGetCurrentUserId(), HttpContext.RequestAborted);
+            return Ok(new { Id = draftId });
+        }
+        catch (AppNotFoundException)
         {
             return NotFound();
         }
-
-        var existingDraft = await LoadFlows(db).SingleOrDefaultAsync(x => x.FlowKey == source.FlowKey && x.LifecycleStatus == FlowLifecycleStatus.Draft);
-        if (existingDraft is not null)
-        {
-            return Ok(new { id = existingDraft.Id });
-        }
-
-        var nextVersion = await db.FlowDefinitions
-            .Where(x => x.FlowKey == source.FlowKey)
-            .MaxAsync(x => x.VersionNumber) + 1;
-
-        var draft = CloneVersion(source, FlowLifecycleStatus.Draft, nextVersion);
-        db.FlowDefinitions.Add(draft);
-        await db.SaveChangesAsync();
-
-        return Ok(new { id = draft.Id });
     }
 
     [HttpPost("{id:guid}/publish")]
     [Authorize(Roles = "SuperAdmin")]
-    public async Task<ActionResult<object>> Publish(Guid id, [FromServices] AppDbContext db)
+    public async Task<ActionResult<object>> Publish(Guid id)
     {
-        var draft = await LoadFlows(db).SingleOrDefaultAsync(x => x.Id == id);
-        if (draft is null)
+        try
+        {
+            var publishedId = await flows.PublishAsync(id, TryGetCurrentUserId(), HttpContext.RequestAborted);
+            return Ok(new { Id = publishedId });
+        }
+        catch (AppValidationException ex)
+        {
+            return BadRequest(new ValidationProblemDetails(ex.Errors));
+        }
+        catch (AppNotFoundException)
         {
             return NotFound();
         }
-
-        if (draft.LifecycleStatus != FlowLifecycleStatus.Draft)
+        catch (AppConflictException ex)
         {
-            return Conflict(new { message = "Apenas rascunhos podem ser publicados." });
+            return Conflict(new { message = ex.Message });
         }
-
-        var validation = ValidateDraftForPublish(draft);
-        if (validation is not null)
-        {
-            return validation;
-        }
-
-        var publishedVersions = await db.FlowDefinitions
-            .Where(x => x.FlowKey == draft.FlowKey && x.LifecycleStatus == FlowLifecycleStatus.Published)
-            .ToListAsync();
-
-        foreach (var published in publishedVersions)
-        {
-            published.LifecycleStatus = FlowLifecycleStatus.Archived;
-        }
-
-        draft.LifecycleStatus = FlowLifecycleStatus.Published;
-        draft.PublishedAt = DateTime.UtcNow;
-
-        await db.SaveChangesAsync();
-
-        return Ok(new { id = draft.Id });
     }
 
     [HttpPost("{id:guid}/steps/{stepId:guid}/test-integration")]
     [Authorize(Roles = "SuperAdmin")]
-    public async Task<ActionResult<IntegrationTestResponse>> TestIntegration(
-        Guid id,
-        Guid stepId,
-        [FromBody] IntegrationTestRequest request,
-        [FromServices] AppDbContext db,
-        [FromServices] IIntegrationExecutionService integrations)
+    public async Task<ActionResult<IntegrationTestResponse>> TestIntegration(Guid id, Guid stepId, [FromBody] IntegrationTestRequest request)
     {
-        var flow = await LoadFlows(db).SingleOrDefaultAsync(x => x.Id == id);
-        if (flow is null)
+        try
+        {
+            return Ok(await flows.TestIntegrationAsync(id, stepId, request, HttpContext.RequestAborted));
+        }
+        catch (AppValidationException ex)
+        {
+            return BadRequest(new ValidationProblemDetails(ex.Errors));
+        }
+        catch (AppNotFoundException)
         {
             return NotFound();
         }
-
-        var step = flow.Steps.SingleOrDefault(x => x.Id == stepId);
-        if (step is null)
-        {
-            return NotFound();
-        }
-
-        if (step.Type != StepType.ApiSend && step.Type != StepType.ApiQuery)
-        {
-            return BadRequest(new { message = "Esta etapa nao possui integracao de API para teste." });
-        }
-
-        var result = await integrations.ExecuteAsync(flow, step, request.Data, HttpContext.RequestAborted, triggerType: IntegrationTriggerType.Test);
-        return Ok(result);
     }
 
-    private static FlowDefinition CloneVersion(FlowDefinition source, FlowLifecycleStatus status, int versionNumber)
+    private Guid? TryGetCurrentUserId()
     {
-        return new FlowDefinition
-        {
-            FlowKey = source.FlowKey,
-            Name = source.Name,
-            Description = source.Description,
-            Active = source.Active,
-            VersionNumber = versionNumber,
-            LifecycleStatus = status,
-            PublishedAt = status == FlowLifecycleStatus.Published ? DateTime.UtcNow : null,
-            Tokens = source.Tokens.Select(token => new FlowToken
-            {
-                Name = token.Name,
-                Value = token.Value,
-                Type = token.Type,
-                HeaderName = token.HeaderName,
-                Active = token.Active
-            }).ToList(),
-            Steps = source.Steps
-                .OrderBy(x => x.Order)
-                .Select(step => new FlowStep
-                {
-                    Name = step.Name,
-                    Description = step.Description,
-                    Type = step.Type,
-                    Order = step.Order,
-                    AssignedUserId = step.AssignedUserId,
-                    ConfigurationJson = step.ConfigurationJson,
-                    Fields = step.Fields
-                        .OrderBy(x => x.Order)
-                        .Select(field => new StepField
-                        {
-                            Key = field.Key,
-                            Label = field.Label,
-                            Type = field.Type,
-                            Required = field.Required,
-                            Order = field.Order,
-                            Options = field.Options
-                                .OrderBy(x => x.Order)
-                                .Select(option => new StepFieldOption
-                                {
-                                    Label = option.Label,
-                                    Value = option.Value,
-                                    Order = option.Order
-                                })
-                                .ToList()
-                        })
-                        .ToList()
-                })
-                .ToList()
-        };
-    }
-
-    private static IQueryable<FlowDefinition> LoadFlows(AppDbContext db)
-    {
-        return db.FlowDefinitions
-            .Include(x => x.Tokens)
-            .Include(x => x.Steps)
-                .ThenInclude(x => x.Fields)
-                    .ThenInclude(x => x.Options);
-    }
-
-    private ActionResult? Validate(SaveFlowRequest request)
-    {
-        if (string.IsNullOrWhiteSpace(request.Name))
-        {
-            return ValidationError(new Dictionary<string, string[]> { ["name"] = ["Nome do fluxo e obrigatorio."] });
-        }
-
-        if (request.Steps.Count == 0)
-        {
-            return ValidationError(new Dictionary<string, string[]> { ["steps"] = ["Ao menos uma etapa e obrigatoria."] });
-        }
-
-        var fieldKeys = request.Steps
-            .SelectMany(x => x.Fields)
-            .Where(x => !string.IsNullOrWhiteSpace(x.Key))
-            .Select(x => x.Key.Trim().ToLowerInvariant())
-            .ToList();
-
-        if (fieldKeys.Count != fieldKeys.Distinct().Count())
-        {
-            return ValidationError(new Dictionary<string, string[]> { ["fields"] = ["As chaves dos campos devem ser unicas no fluxo inteiro."] });
-        }
-
-        foreach (var step in request.Steps)
-        {
-            if (string.IsNullOrWhiteSpace(step.Name))
-            {
-                return ValidationError(new Dictionary<string, string[]> { ["steps"] = ["Todas as etapas precisam de nome."] });
-            }
-
-            if ((step.Type == StepType.ApiSend || step.Type == StepType.ApiQuery) && string.IsNullOrWhiteSpace(step.ApiConfig?.Url))
-            {
-                return ValidationError(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' precisa ter URL configurada."] });
-            }
-        }
-
-        return null;
-    }
-
-    private ActionResult? ValidateDraftForPublish(FlowDefinition draft)
-    {
-        if (!draft.Steps.Any())
-        {
-            return ValidationError(new Dictionary<string, string[]> { ["steps"] = ["Nao e possivel publicar um fluxo sem etapas."] });
-        }
-
-        if (draft.Steps.Any(step => string.IsNullOrWhiteSpace(step.Name)))
-        {
-            return ValidationError(new Dictionary<string, string[]> { ["steps"] = ["Todas as etapas precisam estar nomeadas antes da publicacao."] });
-        }
-
-        return null;
-    }
-
-    private ActionResult ValidationError(Dictionary<string, string[]> errors)
-    {
-        return BadRequest(new ValidationProblemDetails(errors));
+        return Guid.TryParse(User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? User.FindFirst("sub")?.Value, out var userId)
+            ? userId
+            : null;
     }
 }

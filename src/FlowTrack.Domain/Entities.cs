@@ -117,3 +117,14 @@ public sealed class IntegrationAttempt : Entity
     public string? ResponsePreview { get; set; }
     public string? ErrorMessage { get; set; }
 }
+
+public sealed class AuditEntry : Entity
+{
+    public Guid? ActorUserId { get; set; }
+    public string Category { get; set; } = "";
+    public string Action { get; set; } = "";
+    public string EntityType { get; set; } = "";
+    public Guid EntityId { get; set; }
+    public string Summary { get; set; } = "";
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+}

@@ -13,9 +13,14 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.IdentityModel.Tokens;
 using UglyToad.PdfPig;
 using System.Diagnostics;
+using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text.Json;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 
 namespace FlowTrack.IoC;
 
@@ -32,6 +37,15 @@ public static class DependencyInjection
         services.AddScoped<IPasswordService, PasswordService>();
         services.AddScoped<ITokenService, TokenService>();
         services.AddScoped<IPdfExtractionService, PdfExtractionService>();
+        services.AddScoped<IAuthService, AuthService>();
+        services.AddScoped<ITokenProtectionService, TokenProtectionService>();
+        services.AddScoped<IAuditService, AuditService>();
+        services.AddScoped<IFlowManagementService, FlowManagementService>();
+        services.AddScoped<IUserManagementService, UserManagementService>();
+        services.AddScoped<IInstanceManagementService, InstanceManagementService>();
+        services.AddScoped<IInstanceAutomationService, InstanceAutomationService>();
+        services.AddSingleton<IWorkerMonitor, WorkerMonitor>();
+        services.AddHostedService<ApiQueryWorker>();
         services.AddHttpClient<IIntegrationExecutionService, IntegrationExecutionService>(client =>
         {
             client.Timeout = TimeSpan.FromSeconds(30);
@@ -45,13 +59,37 @@ public static class DependencyInjection
                 IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secret)),
                 ClockSkew = TimeSpan.FromMinutes(1), RoleClaimType = ClaimTypes.Role
             };
+            o.Events = new JwtBearerEvents
+            {
+                OnTokenValidated = async context =>
+                {
+                    var db = context.HttpContext.RequestServices.GetRequiredService<AppDbContext>();
+                    var userId = context.Principal?.FindFirstValue(ClaimTypes.NameIdentifier) ?? context.Principal?.FindFirstValue("sub");
+                    if (!Guid.TryParse(userId, out var parsedUserId))
+                    {
+                        context.Fail("Token invalido.");
+                        return;
+                    }
+
+                    var user = await db.AppUsers.AsNoTracking().SingleOrDefaultAsync(x => x.Id == parsedUserId);
+                    if (user is null || !user.Active)
+                    {
+                        context.Fail("Usuario inativo.");
+                    }
+                }
+            };
         });
         services.AddAuthorization();
         return services;
     }
 }
 
-internal sealed class IntegrationExecutionService(HttpClient httpClient, AppDbContext db) : IIntegrationExecutionService
+internal sealed class IntegrationExecutionService(
+    HttpClient httpClient,
+    AppDbContext db,
+    ITokenProtectionService tokenProtection,
+    IConfiguration appConfig,
+    ILogger<IntegrationExecutionService> logger) : IIntegrationExecutionService
 {
     public async Task<IntegrationTestResponse> ExecuteAsync(
         FlowDefinition flow,
@@ -78,8 +116,15 @@ internal sealed class IntegrationExecutionService(HttpClient httpClient, AppDbCo
             resolvedUrl = $"{resolvedUrl}{ResolveTemplate(config.QueryTemplate, data)}";
         }
 
+        var validationError = await ValidateDestinationAsync(resolvedUrl, appConfig, cancellationToken);
+        if (validationError is not null)
+        {
+            logger.LogWarning("Destino de integracao bloqueado para a etapa {StepId}: {Error}", step.Id, validationError);
+            return await SaveAttemptAsync(step, triggerType, method, SanitizeUrl(resolvedUrl), false, null, 0, null, validationError, instance, stepExecution, cancellationToken);
+        }
+
         using var request = new HttpRequestMessage(new HttpMethod(method), resolvedUrl);
-        ApplyToken(flow, config, resolvedUrl, request);
+        ApplyToken(flow, config, request);
 
         if (step.Type == StepType.ApiSend)
         {
@@ -101,7 +146,7 @@ internal sealed class IntegrationExecutionService(HttpClient httpClient, AppDbCo
                 step,
                 triggerType,
                 method,
-                resolvedUrl,
+                SanitizeUrl(resolvedUrl),
                 success,
                 (int)response.StatusCode,
                 (int)watch.ElapsedMilliseconds,
@@ -118,7 +163,7 @@ internal sealed class IntegrationExecutionService(HttpClient httpClient, AppDbCo
                 step,
                 triggerType,
                 method,
-                resolvedUrl,
+                SanitizeUrl(resolvedUrl),
                 false,
                 null,
                 (int)watch.ElapsedMilliseconds,
@@ -167,7 +212,7 @@ internal sealed class IntegrationExecutionService(HttpClient httpClient, AppDbCo
         return value.Length <= max ? value : value[..max];
     }
 
-    private void ApplyToken(FlowDefinition flow, StepApiConfigDto config, string resolvedUrl, HttpRequestMessage request)
+    private void ApplyToken(FlowDefinition flow, StepApiConfigDto config, HttpRequestMessage request)
     {
         if (string.IsNullOrWhiteSpace(config.TokenName))
         {
@@ -180,14 +225,105 @@ internal sealed class IntegrationExecutionService(HttpClient httpClient, AppDbCo
             return;
         }
 
+        var plainValue = tokenProtection.Unprotect(token.Value);
+
         if (token.Type == TokenType.Bearer)
         {
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token.Value);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", plainValue);
             return;
         }
 
         var header = string.IsNullOrWhiteSpace(token.HeaderName) ? "X-API-Key" : token.HeaderName;
-        request.Headers.TryAddWithoutValidation(header, token.Value);
+        request.Headers.TryAddWithoutValidation(header, plainValue);
+    }
+
+    private async Task<string?> ValidateDestinationAsync(string url, IConfiguration configuration, CancellationToken cancellationToken)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
+            return "URL de integracao invalida.";
+        }
+
+        var allowedHosts = (configuration["Integrations:AllowedHosts"] ?? string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var isAllowListed = allowedHosts.Contains(uri.Host);
+        if (!isAllowListed && uri.Scheme != Uri.UriSchemeHttps)
+        {
+            return "Somente destinos HTTPS sao permitidos fora da allowlist.";
+        }
+
+        if (IsLocalHost(uri.Host))
+        {
+            return isAllowListed ? null : "Destino local ou loopback nao permitido.";
+        }
+
+        try
+        {
+            IPAddress[] addresses;
+            if (IPAddress.TryParse(uri.Host, out var directIp))
+            {
+                addresses = [directIp];
+            }
+            else
+            {
+                addresses = await Dns.GetHostAddressesAsync(uri.Host, cancellationToken);
+            }
+
+            foreach (var address in addresses)
+            {
+                if (!isAllowListed && IsPrivateAddress(address))
+                {
+                    return "Destino privado/interno bloqueado por protecao SSRF.";
+                }
+            }
+        }
+        catch
+        {
+            if (!isAllowListed)
+            {
+                return "Nao foi possivel validar o destino da integracao.";
+            }
+        }
+
+        return null;
+    }
+
+    private static bool IsLocalHost(string host)
+    {
+        return host.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+            || host.Equals("127.0.0.1", StringComparison.OrdinalIgnoreCase)
+            || host.Equals("::1", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsPrivateAddress(IPAddress address)
+    {
+        if (IPAddress.IsLoopback(address))
+        {
+            return true;
+        }
+
+        if (address.AddressFamily == AddressFamily.InterNetworkV6)
+        {
+            return address.IsIPv6LinkLocal || address.IsIPv6SiteLocal || address.IsIPv6Multicast;
+        }
+
+        var bytes = address.GetAddressBytes();
+        return bytes[0] == 10
+            || (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31)
+            || (bytes[0] == 192 && bytes[1] == 168)
+            || (bytes[0] == 169 && bytes[1] == 254);
+    }
+
+    private static string SanitizeUrl(string value)
+    {
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri))
+        {
+            return Truncate(value, 1900);
+        }
+
+        return uri.GetLeftPart(UriPartial.Path);
     }
 
     private async Task<IntegrationTestResponse> SaveAttemptAsync(
@@ -223,6 +359,309 @@ internal sealed class IntegrationExecutionService(HttpClient httpClient, AppDbCo
         await db.SaveChangesAsync(cancellationToken);
 
         return new IntegrationTestResponse(success, statusCode, durationMs, attempt.Url, method, attempt.ResponsePreview, attempt.ErrorMessage);
+    }
+}
+
+internal sealed class TokenProtectionService(IConfiguration configuration) : ITokenProtectionService
+{
+    private readonly byte[] _key = SHA256.HashData(Encoding.UTF8.GetBytes(configuration["TokenEncryption:Key"] ?? configuration["Jwt:Secret"] ?? throw new InvalidOperationException("Chave de criptografia nao configurada.")));
+
+    public string Protect(string plainText)
+    {
+        if (string.IsNullOrWhiteSpace(plainText))
+        {
+            return string.Empty;
+        }
+
+        var nonce = RandomNumberGenerator.GetBytes(12);
+        var plaintextBytes = Encoding.UTF8.GetBytes(plainText);
+        var cipherBytes = new byte[plaintextBytes.Length];
+        var tag = new byte[16];
+
+        using var aes = new AesGcm(_key, 16);
+        aes.Encrypt(nonce, plaintextBytes, cipherBytes, tag);
+
+        return Convert.ToBase64String([.. nonce, .. tag, .. cipherBytes]);
+    }
+
+    public string Unprotect(string protectedText)
+    {
+        if (string.IsNullOrWhiteSpace(protectedText))
+        {
+            return string.Empty;
+        }
+
+        var payload = Convert.FromBase64String(protectedText);
+        var nonce = payload[..12];
+        var tag = payload[12..28];
+        var cipher = payload[28..];
+        var plaintext = new byte[cipher.Length];
+
+        using var aes = new AesGcm(_key, 16);
+        aes.Decrypt(nonce, cipher, tag, plaintext);
+        return Encoding.UTF8.GetString(plaintext);
+    }
+}
+
+internal sealed class AuditService(AppDbContext db) : IAuditService
+{
+    public async Task WriteAsync(string category, string action, string entityType, Guid entityId, string summary, Guid? actorUserId, CancellationToken cancellationToken)
+    {
+        db.AuditEntries.Add(new AuditEntry
+        {
+            ActorUserId = actorUserId,
+            Category = category,
+            Action = action,
+            EntityType = entityType,
+            EntityId = entityId,
+            Summary = summary
+        });
+
+        await db.SaveChangesAsync(cancellationToken);
+    }
+}
+
+internal sealed class WorkerMonitor : IWorkerMonitor
+{
+    public DateTime? LastRunAtUtc { get; private set; }
+    public DateTime? LastSuccessAtUtc { get; private set; }
+    public string? LastError { get; private set; }
+
+    public void MarkRun() => LastRunAtUtc = DateTime.UtcNow;
+    public void MarkSuccess()
+    {
+        LastSuccessAtUtc = DateTime.UtcNow;
+        LastError = null;
+    }
+    public void MarkFailure(string error)
+    {
+        LastError = error;
+        LastRunAtUtc = DateTime.UtcNow;
+    }
+}
+
+internal sealed class InstanceAutomationService(
+    AppDbContext db,
+    IIntegrationExecutionService integrations,
+    ILogger<InstanceAutomationService> logger) : IInstanceAutomationService
+{
+    public async Task ProcessAsync(Guid instanceId, CancellationToken cancellationToken, bool forceFailedCurrent = false)
+    {
+        while (true)
+        {
+            var item = await LoadInstance().SingleAsync(x => x.Id == instanceId, cancellationToken);
+            if (item.Status != InstanceStatus.InProgress)
+            {
+                return;
+            }
+
+            var current = item.StepExecutions.SingleOrDefault(x => x.Status == StepStatus.InProgress || (forceFailedCurrent && x.Status == StepStatus.Failed));
+            if (current is null)
+            {
+                return;
+            }
+
+            if (current.Status == StepStatus.Failed && forceFailedCurrent)
+            {
+                current.Status = StepStatus.InProgress;
+            }
+
+            var currentData = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(item.DataJson) ?? [];
+            var stepType = current.FlowStep.Type;
+
+            if (stepType == StepType.Automatic)
+            {
+                CompleteCurrentStep(item, current, "Etapa automatica concluida pelo sistema.", null);
+                await db.SaveChangesAsync(cancellationToken);
+                forceFailedCurrent = false;
+                continue;
+            }
+
+            if (stepType != StepType.ApiSend && stepType != StepType.ApiQuery)
+            {
+                return;
+            }
+
+            var result = await integrations.ExecuteAsync(item.FlowDefinition, current.FlowStep, currentData, cancellationToken, item, current, IntegrationTriggerType.Runtime);
+            if (!result.Success)
+            {
+                logger.LogWarning("Falha de integracao na instancia {InstanceId}, etapa {StepId}: {Error}", item.Id, current.FlowStepId, result.ErrorMessage);
+                current.Status = StepStatus.Failed;
+                current.Notes = result.ErrorMessage ?? "Falha na integracao.";
+                item.UpdatedAt = DateTime.UtcNow;
+                await db.SaveChangesAsync(cancellationToken);
+                return;
+            }
+
+            CompleteCurrentStep(item, current, "Etapa de integracao concluida automaticamente.", null);
+            await db.SaveChangesAsync(cancellationToken);
+            forceFailedCurrent = false;
+        }
+    }
+
+    private IQueryable<FlowInstance> LoadInstance()
+    {
+        return db.FlowInstances
+            .Include(x => x.FlowDefinition)
+                .ThenInclude(x => x.Tokens)
+            .Include(x => x.FlowDefinition)
+                .ThenInclude(x => x.Steps)
+            .Include(x => x.StepExecutions)
+                .ThenInclude(x => x.FlowStep);
+    }
+
+    private static void CompleteCurrentStep(FlowInstance item, StepExecution current, string? notes, Guid? completedByUserId)
+    {
+        var now = DateTime.UtcNow;
+        current.Status = StepStatus.Completed;
+        current.CompletedAt = now;
+        current.Notes = notes;
+        current.CompletedByUserId = completedByUserId;
+
+        var next = item.StepExecutions
+            .Where(x => x.FlowStep.Order > current.FlowStep.Order)
+            .OrderBy(x => x.FlowStep.Order)
+            .FirstOrDefault();
+
+        if (next is null)
+        {
+            item.Status = InstanceStatus.Completed;
+        }
+        else
+        {
+            next.Status = StepStatus.InProgress;
+            next.StartedAt ??= now;
+            item.CurrentStepOrder = next.FlowStep.Order;
+        }
+
+        item.UpdatedAt = now;
+    }
+}
+
+internal sealed class ApiQueryWorker(
+    IServiceScopeFactory scopeFactory,
+    IWorkerMonitor workerMonitor,
+    ILogger<ApiQueryWorker> logger) : BackgroundService
+{
+    private static readonly SemaphoreSlim Gate = new(1, 1);
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            await Gate.WaitAsync(stoppingToken);
+            try
+            {
+                workerMonitor.MarkRun();
+                await ProcessDueQueriesAsync(stoppingToken);
+                workerMonitor.MarkSuccess();
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Falha no worker de consultas agendadas.");
+                workerMonitor.MarkFailure(ex.Message);
+            }
+            finally
+            {
+                Gate.Release();
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
+        }
+    }
+
+    private async Task ProcessDueQueriesAsync(CancellationToken stoppingToken)
+    {
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var automation = scope.ServiceProvider.GetRequiredService<IInstanceAutomationService>();
+
+        var candidates = await db.FlowInstances
+            .AsNoTracking()
+            .Include(x => x.StepExecutions)
+                .ThenInclude(x => x.FlowStep)
+            .Where(x => x.Status == InstanceStatus.InProgress)
+            .ToListAsync(stoppingToken);
+
+        foreach (var instance in candidates)
+        {
+            var current = instance.StepExecutions.SingleOrDefault(x => x.Status == StepStatus.InProgress || x.Status == StepStatus.Failed);
+            if (current is null || current.FlowStep.Type != StepType.ApiQuery)
+            {
+                continue;
+            }
+
+            var config = string.IsNullOrWhiteSpace(current.FlowStep.ConfigurationJson)
+                ? null
+                : JsonSerializer.Deserialize<StepApiConfigDto>(current.FlowStep.ConfigurationJson);
+
+            if (config is null || !IsDue(config, db, instance.Id, current.FlowStepId))
+            {
+                continue;
+            }
+
+            await automation.ProcessAsync(instance.Id, stoppingToken, forceFailedCurrent: current.Status == StepStatus.Failed);
+        }
+    }
+
+    private static bool IsDue(StepApiConfigDto config, AppDbContext db, Guid instanceId, Guid stepId)
+    {
+        if (string.Equals(config.ScheduleMode, "manual", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var lastAttempt = db.IntegrationAttempts
+            .AsNoTracking()
+            .Where(x => x.FlowInstanceId == instanceId && x.FlowStepId == stepId && x.TriggerType == IntegrationTriggerType.Runtime)
+            .OrderByDescending(x => x.CreatedAt)
+            .FirstOrDefault();
+
+        if (lastAttempt is null)
+        {
+            return true;
+        }
+
+        if (string.Equals(config.ScheduleMode, "interval", StringComparison.OrdinalIgnoreCase))
+        {
+            var minutes = ParseIntervalMinutes(config.ScheduleValue);
+            return minutes > 0 && lastAttempt.CreatedAt <= DateTime.UtcNow.AddMinutes(-minutes);
+        }
+
+        if (string.Equals(config.ScheduleMode, "cron", StringComparison.OrdinalIgnoreCase))
+        {
+            var minutes = ParseCronMinutes(config.ScheduleValue);
+            return minutes > 0 && lastAttempt.CreatedAt <= DateTime.UtcNow.AddMinutes(-minutes);
+        }
+
+        return false;
+    }
+
+    private static int ParseIntervalMinutes(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return 0;
+        }
+
+        var digits = new string(value.Where(char.IsDigit).ToArray());
+        return int.TryParse(digits, out var minutes) ? Math.Max(minutes, 1) : 0;
+    }
+
+    private static int ParseCronMinutes(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return 0;
+        }
+
+        var parts = value.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length > 0 && parts[0].StartsWith("*/", StringComparison.Ordinal))
+        {
+            return int.TryParse(parts[0][2..], out var everyMinutes) ? Math.Max(everyMinutes, 1) : 0;
+        }
+
+        return 1;
     }
 }
 

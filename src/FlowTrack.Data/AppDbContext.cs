@@ -15,10 +15,19 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
     public DbSet<FlowInstance> FlowInstances => Set<FlowInstance>();
     public DbSet<StepExecution> StepExecutions => Set<StepExecution>();
     public DbSet<IntegrationAttempt> IntegrationAttempts => Set<IntegrationAttempt>();
+    public DbSet<AuditEntry> AuditEntries => Set<AuditEntry>();
     public IQueryable<AppUser> Users => AppUsers;
     public IQueryable<FlowDefinition> Flows => FlowDefinitions;
     public IQueryable<FlowInstance> Instances => FlowInstances;
+    public IQueryable<FlowToken> Tokens => FlowTokens;
+    public IQueryable<FlowStep> Steps => FlowSteps;
+    public IQueryable<StepField> Fields => StepFields;
+    public IQueryable<StepFieldOption> FieldOptions => StepFieldOptions;
+    IQueryable<StepExecution> IAppDbContext.StepExecutions => StepExecutions;
+    IQueryable<IntegrationAttempt> IAppDbContext.IntegrationAttempts => IntegrationAttempts;
+    IQueryable<AuditEntry> IAppDbContext.AuditEntries => AuditEntries;
     public new void Add<T>(T entity) where T : class => Set<T>().Add(entity);
+    public void RemoveRange<T>(IEnumerable<T> entities) where T : class => Set<T>().RemoveRange(entities);
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -39,6 +48,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
         b.Entity<StepExecution>().HasOne(x => x.FlowStep).WithMany().HasForeignKey(x => x.FlowStepId).OnDelete(DeleteBehavior.Restrict);
         b.Entity<IntegrationAttempt>().HasIndex(x => x.FlowInstanceId);
         b.Entity<IntegrationAttempt>().HasIndex(x => x.FlowStepId);
+        b.Entity<AuditEntry>().HasIndex(x => x.CreatedAt);
         b.Entity<FlowDefinition>().Property(x => x.Name).HasMaxLength(160);
         b.Entity<FlowInstance>().Property(x => x.Code).HasMaxLength(120);
         b.Entity<FlowToken>().Property(x => x.Name).HasMaxLength(120);
@@ -52,5 +62,9 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
         b.Entity<IntegrationAttempt>().Property(x => x.Url).HasMaxLength(2000);
         b.Entity<IntegrationAttempt>().Property(x => x.ResponsePreview).HasMaxLength(2000);
         b.Entity<IntegrationAttempt>().Property(x => x.ErrorMessage).HasMaxLength(1000);
+        b.Entity<AuditEntry>().Property(x => x.Category).HasMaxLength(80);
+        b.Entity<AuditEntry>().Property(x => x.Action).HasMaxLength(80);
+        b.Entity<AuditEntry>().Property(x => x.EntityType).HasMaxLength(80);
+        b.Entity<AuditEntry>().Property(x => x.Summary).HasMaxLength(1000);
     }
 }

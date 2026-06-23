@@ -1,31 +1,22 @@
 using FlowTrack.Application;
-using FlowTrack.Data;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
 
 namespace FlowTrack.API.Controllers;
 
 [ApiController]
 [Route("api/auth")]
-public sealed class AuthController : ControllerBase
+public sealed class AuthController(IAuthService auth) : ControllerBase
 {
     [HttpPost("login")]
-    public async Task<ActionResult<LoginResponse>> Login(
-        [FromBody] LoginRequest request,
-        [FromServices] AppDbContext db,
-        [FromServices] IPasswordService passwords,
-        [FromServices] ITokenService tokens)
+    public async Task<ActionResult<LoginResponse>> Login([FromBody] LoginRequest request)
     {
-        var email = request.Email.Trim().ToLowerInvariant();
-        var user = await db.AppUsers.SingleOrDefaultAsync(x => x.Email == email && x.Active);
-
-        if (user is null || !passwords.Verify(user, user.PasswordHash, request.Password))
+        try
+        {
+            return Ok(await auth.LoginAsync(request, HttpContext.RequestAborted));
+        }
+        catch (AppForbiddenException)
         {
             return Unauthorized();
         }
-
-        return Ok(new LoginResponse(
-            tokens.Create(user),
-            new UserDto(user.Id, user.Name, user.Email, user.Role.ToString(), user.Active)));
     }
 }

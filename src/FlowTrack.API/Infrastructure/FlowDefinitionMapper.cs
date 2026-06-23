@@ -7,7 +7,7 @@ namespace FlowTrack.API.Infrastructure;
 
 internal static class FlowDefinitionMapper
 {
-    public static FlowDto ToDto(FlowDefinition flow, IMapper mapper, bool includeTokenValues = false, bool hasDraft = false)
+    public static FlowDto ToDto(FlowDefinition flow, IMapper mapper, ITokenProtectionService tokenProtection, bool includeTokenValues = false, bool hasDraft = false)
     {
         return new FlowDto(
             flow.Id,
@@ -21,7 +21,7 @@ internal static class FlowDefinitionMapper
             hasDraft,
             flow.Tokens
                 .OrderBy(x => x.Name)
-                .Select(x => new FlowTokenDto(x.Id, x.Name, includeTokenValues ? x.Value : null, x.Type, x.HeaderName, x.Active))
+                .Select(x => new FlowTokenDto(x.Id, x.Name, includeTokenValues && !string.IsNullOrWhiteSpace(x.Value) ? tokenProtection.Unprotect(x.Value) : null, x.Type, x.HeaderName, x.Active))
                 .ToList(),
             flow.Steps
                 .OrderBy(x => x.Order)
@@ -40,7 +40,7 @@ internal static class FlowDefinitionMapper
                 .ToList());
     }
 
-    public static void Apply(FlowDefinition flow, SaveFlowRequest request)
+    public static void Apply(FlowDefinition flow, SaveFlowRequest request, ITokenProtectionService tokenProtection)
     {
         flow.Name = request.Name.Trim();
         flow.Description = request.Description.Trim();
@@ -51,7 +51,7 @@ internal static class FlowDefinitionMapper
             .Select(x => new FlowToken
             {
                 Name = x.Name.Trim(),
-                Value = x.Value?.Trim() ?? string.Empty,
+                Value = string.IsNullOrWhiteSpace(x.Value) ? string.Empty : tokenProtection.Protect(x.Value.Trim()),
                 Type = x.Type,
                 HeaderName = string.IsNullOrWhiteSpace(x.HeaderName) ? null : x.HeaderName.Trim(),
                 Active = x.Active

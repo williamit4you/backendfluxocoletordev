@@ -30,13 +30,27 @@ public interface IAppDbContext
     IQueryable<AppUser> Users { get; }
     IQueryable<FlowDefinition> Flows { get; }
     IQueryable<FlowInstance> Instances { get; }
+    IQueryable<FlowToken> Tokens { get; }
+    IQueryable<FlowStep> Steps { get; }
+    IQueryable<StepField> Fields { get; }
+    IQueryable<StepFieldOption> FieldOptions { get; }
+    IQueryable<StepExecution> StepExecutions { get; }
+    IQueryable<IntegrationAttempt> IntegrationAttempts { get; }
+    IQueryable<AuditEntry> AuditEntries { get; }
     void Add<T>(T entity) where T : class;
+    void RemoveRange<T>(IEnumerable<T> entities) where T : class;
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
 }
 
 public interface ITokenService { string Create(AppUser user); }
 public interface IPasswordService { string Hash(AppUser user, string password); bool Verify(AppUser user, string hash, string password); }
 public interface IPdfExtractionService { Task<PdfExtractionDto> ExtractAsync(Stream stream, CancellationToken cancellationToken); }
+public interface IAuthService { Task<LoginResponse> LoginAsync(LoginRequest request, CancellationToken cancellationToken); }
+public interface ITokenProtectionService
+{
+    string Protect(string plainText);
+    string Unprotect(string protectedText);
+}
 public interface IIntegrationExecutionService
 {
     Task<IntegrationTestResponse> ExecuteAsync(
@@ -48,6 +62,59 @@ public interface IIntegrationExecutionService
         StepExecution? stepExecution = null,
         IntegrationTriggerType triggerType = IntegrationTriggerType.Runtime);
 }
+public interface IInstanceAutomationService
+{
+    Task ProcessAsync(Guid instanceId, CancellationToken cancellationToken, bool forceFailedCurrent = false);
+}
+public interface IAuditService
+{
+    Task WriteAsync(string category, string action, string entityType, Guid entityId, string summary, Guid? actorUserId, CancellationToken cancellationToken);
+}
+public interface IWorkerMonitor
+{
+    DateTime? LastRunAtUtc { get; }
+    DateTime? LastSuccessAtUtc { get; }
+    string? LastError { get; }
+    void MarkRun();
+    void MarkSuccess();
+    void MarkFailure(string error);
+}
+
+public interface IFlowManagementService
+{
+    Task<IReadOnlyList<FlowDto>> GetAllAsync(string? scope, CancellationToken cancellationToken);
+    Task<FlowDto> GetByIdAsync(Guid id, CancellationToken cancellationToken);
+    Task<Guid> CreateAsync(SaveFlowRequest request, Guid? actorUserId, CancellationToken cancellationToken);
+    Task<Guid> UpdateAsync(Guid id, SaveFlowRequest request, Guid? actorUserId, CancellationToken cancellationToken);
+    Task<Guid> CreateDraftAsync(Guid id, Guid? actorUserId, CancellationToken cancellationToken);
+    Task<Guid> PublishAsync(Guid id, Guid? actorUserId, CancellationToken cancellationToken);
+    Task<IntegrationTestResponse> TestIntegrationAsync(Guid flowId, Guid stepId, IntegrationTestRequest request, CancellationToken cancellationToken);
+}
+
+public interface IUserManagementService
+{
+    Task<IReadOnlyList<UserDto>> GetAllAsync(CancellationToken cancellationToken);
+    Task<UserDto> CreateAsync(CreateUserRequest request, string? currentUserRole, Guid? actorUserId, CancellationToken cancellationToken);
+    Task<UserDto> UpdateAsync(Guid id, UpdateUserRequest request, string? currentUserRole, Guid? actorUserId, CancellationToken cancellationToken);
+}
+
+public interface IInstanceManagementService
+{
+    Task<IReadOnlyList<InstanceDto>> GetAllAsync(Guid? flowId, string? status, string? search, CancellationToken cancellationToken);
+    Task<InstanceDto> GetByIdAsync(Guid id, CancellationToken cancellationToken);
+    Task<Guid> CreateAsync(CreateInstanceRequest request, CancellationToken cancellationToken);
+    Task AdvanceAsync(Guid id, AdvanceStepRequest request, Guid? actorUserId, CancellationToken cancellationToken);
+    Task<InstanceDto> RetryIntegrationAsync(Guid id, CancellationToken cancellationToken);
+}
+
+public abstract class AppServiceException(string message) : Exception(message);
+public sealed class AppValidationException(Dictionary<string, string[]> errors) : AppServiceException("Falha de validacao.")
+{
+    public Dictionary<string, string[]> Errors { get; } = errors;
+}
+public sealed class AppNotFoundException(string message) : AppServiceException(message);
+public sealed class AppConflictException(string message) : AppServiceException(message);
+public sealed class AppForbiddenException(string message = "Operacao nao permitida.") : AppServiceException(message);
 
 public sealed class MappingProfile : Profile
 {
