@@ -3,6 +3,7 @@ using System;
 using FlowTrack.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace FlowTrack.Data.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260623150407_StepExecutionDataJson")]
+    partial class StepExecutionDataJson
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -21,7 +24,7 @@ namespace FlowTrack.Data.Migrations
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
             NpgsqlModelBuilderExtensions.HasPostgresEnum(modelBuilder, "entry_type", new[] { "manual", "reader", "automatic", "api_send", "api_query" });
-            NpgsqlModelBuilderExtensions.HasPostgresEnum(modelBuilder, "field_type", new[] { "text", "number", "date", "document", "email", "select", "boolean", "attachment", "photo", "radio" });
+            NpgsqlModelBuilderExtensions.HasPostgresEnum(modelBuilder, "field_type", new[] { "text", "number", "date", "document", "email", "select", "boolean" });
             NpgsqlModelBuilderExtensions.HasPostgresEnum(modelBuilder, "flow_lifecycle_status", new[] { "draft", "published", "archived" });
             NpgsqlModelBuilderExtensions.HasPostgresEnum(modelBuilder, "instance_status", new[] { "in_progress", "completed", "cancelled" });
             NpgsqlModelBuilderExtensions.HasPostgresEnum(modelBuilder, "integration_trigger_type", new[] { "runtime", "test" });
@@ -371,10 +374,6 @@ namespace FlowTrack.Data.Migrations
                         .IsRequired()
                         .HasMaxLength(160)
                         .HasColumnType("character varying(160)");
-
-                    b.Property<string>("Mask")
-                        .HasMaxLength(80)
-                        .HasColumnType("character varying(80)");
 
                     b.Property<int>("Order")
                         .HasColumnType("integer");

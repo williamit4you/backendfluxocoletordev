@@ -10,7 +10,7 @@ public record UserDto(Guid Id, string Name, string Email, string Role, bool Acti
 public record CreateUserRequest(string Name, string Email, string Password, string Role);
 public record UpdateUserRequest(string Name, string Role, bool Active, string? Password);
 public record FieldOptionDto(Guid? Id, string Label, string Value, int Order);
-public record FieldDto(Guid? Id, string Key, string Label, FieldType Type, bool Required, int Order, IReadOnlyList<FieldOptionDto> Options);
+public record FieldDto(Guid? Id, string Key, string Label, FieldType Type, string? Mask, bool Required, int Order, IReadOnlyList<FieldOptionDto> Options);
 public record FlowTokenDto(Guid? Id, string Name, string? Value, TokenType Type, string? HeaderName, bool Active);
 public record ResponseFieldMappingDto(string FieldKey, string ResponsePath);
 public record BodyFieldMappingDto(string TargetKey, string SourceReference);
@@ -23,9 +23,10 @@ public record IntegrationTestRequest(Dictionary<string, JsonElement> Data);
 public record IntegrationTestResponse(bool Success, int? StatusCode, int DurationMs, string Url, string Method, string? ResponsePreview, string? ErrorMessage, Dictionary<string, string>? MappedFields = null);
 public record IntegrationExecutionResult(bool Success, int? StatusCode, int DurationMs, string Url, string Method, string? ResponsePreview, string? ErrorMessage, Dictionary<string, JsonElement>? MappedData = null);
 public record CreateInstanceRequest(Guid FlowDefinitionId, string? Code, Dictionary<string, JsonElement> Data);
-public record AdvanceStepRequest(string? Notes);
-public record StepProgressDto(Guid Id, string Name, int Order, StepType Type, StepStatus Status, DateTime? StartedAt, DateTime? CompletedAt);
-public record InstanceDto(Guid Id, Guid FlowDefinitionId, string FlowName, string Code, InstanceStatus Status, int CurrentStepOrder, DateTime CreatedAt, DateTime UpdatedAt, Dictionary<string, JsonElement> Data, IReadOnlyList<StepProgressDto> Steps);
+public record AdvanceStepRequest(string? Notes, Dictionary<string, JsonElement>? Data = null);
+public record ExecutionFieldDto(Guid? Id, string Key, string Label, FieldType Type, string? Mask, bool Required, int Order, IReadOnlyList<FieldOptionDto> Options, string? Value);
+public record StepProgressDto(Guid Id, Guid FlowStepId, string Name, int Order, StepType Type, StepStatus Status, DateTime? StartedAt, DateTime? CompletedAt, Guid? CompletedByUserId, string? CompletedByName, string? Notes, bool IsAutomatic, Dictionary<string, JsonElement> Data, IReadOnlyList<ExecutionFieldDto> Fields, IReadOnlyList<IntegrationAttemptDto> IntegrationAttempts);
+public record InstanceDto(Guid Id, Guid FlowDefinitionId, string FlowName, string Code, InstanceStatus Status, int CurrentStepOrder, DateTime CreatedAt, DateTime UpdatedAt, Dictionary<string, JsonElement> Data, Guid? CurrentStepExecutionId, IReadOnlyList<StepProgressDto> Steps);
 public record PdfExtractionDto(Dictionary<string, string> Fields, IReadOnlyList<string> Warnings);
 
 public interface IAppDbContext
@@ -106,6 +107,7 @@ public interface IInstanceManagementService
     Task<IReadOnlyList<InstanceDto>> GetAllAsync(Guid? flowId, string? status, string? search, CancellationToken cancellationToken);
     Task<InstanceDto> GetByIdAsync(Guid id, CancellationToken cancellationToken);
     Task<Guid> CreateAsync(CreateInstanceRequest request, CancellationToken cancellationToken);
+    Task<InstanceDto> SaveCurrentStepDataAsync(Guid id, Dictionary<string, JsonElement> data, string? notes, Guid? actorUserId, CancellationToken cancellationToken);
     Task AdvanceAsync(Guid id, AdvanceStepRequest request, Guid? actorUserId, CancellationToken cancellationToken);
     Task<InstanceDto> RetryIntegrationAsync(Guid id, CancellationToken cancellationToken);
 }

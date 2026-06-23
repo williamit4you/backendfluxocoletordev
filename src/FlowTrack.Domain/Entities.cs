@@ -3,7 +3,7 @@ namespace FlowTrack.Domain;
 public enum UserRole { SuperAdmin, Admin, User }
 public enum EntryType { Manual, Reader, Automatic, ApiSend, ApiQuery }
 public enum StepType { Reader, UserTask, ExternalMonitor, Automatic, ApiSend, ApiQuery }
-public enum FieldType { Text, Number, Date, Document, Email, Select, Boolean }
+public enum FieldType { Text, Number, Date, Document, Email, Select, Boolean, Attachment, Photo, Radio }
 public enum InstanceStatus { InProgress, Completed, Cancelled }
 public enum StepStatus { Pending, InProgress, Completed, Failed }
 public enum TokenType { Bearer, ApiKey }
@@ -51,6 +51,7 @@ public sealed class StepField : Entity
     public string Key { get; set; } = "";
     public string Label { get; set; } = "";
     public FieldType Type { get; set; }
+    public string? Mask { get; set; }
     public bool Required { get; set; }
     public int Order { get; set; }
     public List<StepFieldOption> Options { get; set; } = [];
@@ -100,6 +101,7 @@ public sealed class StepExecution : Entity
     public DateTime? CompletedAt { get; set; }
     public Guid? CompletedByUserId { get; set; }
     public string? Notes { get; set; }
+    public string DataJson { get; set; } = "{}";
 }
 
 public sealed class IntegrationAttempt : Entity

@@ -56,12 +56,14 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
         b.Entity<FlowStep>().Property(x => x.Name).HasMaxLength(160);
         b.Entity<StepField>().Property(x => x.Key).HasMaxLength(120);
         b.Entity<StepField>().Property(x => x.Label).HasMaxLength(160);
+        b.Entity<StepField>().Property(x => x.Mask).HasMaxLength(80);
         b.Entity<StepFieldOption>().Property(x => x.Label).HasMaxLength(120);
         b.Entity<StepFieldOption>().Property(x => x.Value).HasMaxLength(240);
         b.Entity<IntegrationAttempt>().Property(x => x.Method).HasMaxLength(10);
         b.Entity<IntegrationAttempt>().Property(x => x.Url).HasMaxLength(2000);
         b.Entity<IntegrationAttempt>().Property(x => x.ResponsePreview).HasMaxLength(2000);
         b.Entity<IntegrationAttempt>().Property(x => x.ErrorMessage).HasMaxLength(1000);
+        b.Entity<StepExecution>().Property(x => x.DataJson).HasColumnType("text");
         b.Entity<AuditEntry>().Property(x => x.Category).HasMaxLength(80);
         b.Entity<AuditEntry>().Property(x => x.Action).HasMaxLength(80);
         b.Entity<AuditEntry>().Property(x => x.EntityType).HasMaxLength(80);

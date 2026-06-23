@@ -244,6 +244,7 @@ public sealed class FlowManagementService(
                         Key = field.Key.Trim(),
                         Label = field.Label.Trim(),
                         Type = field.Type,
+                        Mask = string.IsNullOrWhiteSpace(field.Mask) ? null : field.Mask.Trim(),
                         Required = field.Required,
                         Order = fieldIndex + 1,
                         Options = field.Options
@@ -307,6 +308,7 @@ public sealed class FlowManagementService(
                             Key = field.Key,
                             Label = field.Label,
                             Type = field.Type,
+                            Mask = field.Mask,
                             Required = field.Required,
                             Order = field.Order,
                             Options = field.Options
@@ -358,6 +360,17 @@ public sealed class FlowManagementService(
             if ((step.Type == StepType.ApiSend || step.Type == StepType.ApiQuery) && string.IsNullOrWhiteSpace(step.ApiConfig?.Url))
             {
                 throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' precisa ter URL configurada."] });
+            }
+
+            foreach (var field in step.Fields)
+            {
+                if (field.Type == FieldType.Select || field.Type == FieldType.Radio)
+                {
+                    if (field.Options.Count == 0)
+                    {
+                        throw new AppValidationException(new Dictionary<string, string[]> { ["fields"] = [$"O campo '{field.Label}' precisa ter opções cadastradas."] });
+                    }
+                }
             }
         }
     }
@@ -526,8 +539,11 @@ public sealed class InstanceManagementService(
             .AsNoTracking()
             .Include(x => x.FlowDefinition)
                 .ThenInclude(x => x.Steps)
+                    .ThenInclude(x => x.Fields)
+                        .ThenInclude(x => x.Options)
             .Include(x => x.StepExecutions)
                 .ThenInclude(x => x.FlowStep)
+            .Include(x => x.IntegrationAttempts)
             .AsQueryable();
 
         if (flowId.HasValue)
@@ -547,7 +563,13 @@ public sealed class InstanceManagementService(
         }
 
         var rows = await query.OrderByDescending(x => x.UpdatedAt).Take(200).ToListAsync(cancellationToken);
-        return rows.Select(ToDto).ToList();
+        var result = new List<InstanceDto>(rows.Count);
+        foreach (var row in rows)
+        {
+            result.Add(await ToDtoAsync(row, cancellationToken));
+        }
+
+        return result;
     }
 
     public async Task<InstanceDto> GetByIdAsync(Guid id, CancellationToken cancellationToken)
@@ -555,7 +577,7 @@ public sealed class InstanceManagementService(
         var item = await LoadInstance().AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
             ?? throw new AppNotFoundException("Execucao nao encontrada.");
 
-        return ToDto(item);
+        return await ToDtoAsync(item, cancellationToken);
     }
 
     public async Task<Guid> CreateAsync(CreateInstanceRequest request, CancellationToken cancellationToken)
@@ -614,6 +636,41 @@ public sealed class InstanceManagementService(
         return instance.Id;
     }
 
+    public async Task<InstanceDto> SaveCurrentStepDataAsync(Guid id, Dictionary<string, JsonElement> data, string? notes, Guid? actorUserId, CancellationToken cancellationToken)
+    {
+        var item = await LoadInstance().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
+            ?? throw new AppNotFoundException("Execucao nao encontrada.");
+
+        if (item.Status != InstanceStatus.InProgress)
+        {
+            throw new AppConflictException("Execucao nao esta em andamento.");
+        }
+
+        var current = item.StepExecutions.SingleOrDefault(x => x.Status == StepStatus.InProgress);
+        if (current is null)
+        {
+            throw new AppConflictException("Nenhuma etapa ativa encontrada.");
+        }
+
+        if (current.FlowStep.Type == StepType.ApiSend || current.FlowStep.Type == StepType.ApiQuery || current.FlowStep.Type == StepType.Automatic)
+        {
+            throw new AppConflictException("A etapa atual eh automatica e nao aceita preenchimento manual.");
+        }
+
+        var mergedData = MergeStepData(item, current, data);
+        ValidateRequiredFields(current, mergedData);
+
+        current.DataJson = JsonSerializer.Serialize(mergedData);
+        current.Notes = notes;
+        item.DataJson = MergeInstanceData(item.DataJson, mergedData);
+        item.UpdatedAt = DateTime.UtcNow;
+
+        await db.SaveChangesAsync(cancellationToken);
+
+        var reloaded = await LoadInstance().AsNoTracking().SingleAsync(x => x.Id == id, cancellationToken);
+        return await ToDtoAsync(reloaded, cancellationToken);
+    }
+
     public async Task AdvanceAsync(Guid id, AdvanceStepRequest request, Guid? actorUserId, CancellationToken cancellationToken)
     {
         var item = await LoadInstance().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
@@ -635,6 +692,11 @@ public sealed class InstanceManagementService(
             throw new AppConflictException("A etapa atual eh automatica. Use o retry de integracao se necessario.");
         }
 
+        var mergedData = MergeStepData(item, current, request.Data);
+        ValidateRequiredFields(current, mergedData);
+        current.DataJson = JsonSerializer.Serialize(mergedData);
+        item.DataJson = MergeInstanceData(item.DataJson, mergedData);
+
         CompleteCurrentStep(item, current, request.Notes, actorUserId);
         await db.SaveChangesAsync(cancellationToken);
         await automation.ProcessAsync(item.Id, cancellationToken);
@@ -647,7 +709,7 @@ public sealed class InstanceManagementService(
 
         await automation.ProcessAsync(item.Id, cancellationToken, forceFailedCurrent: true);
         var reloaded = await LoadInstance().AsNoTracking().SingleAsync(x => x.Id == id, cancellationToken);
-        return ToDto(reloaded);
+        return await ToDtoAsync(reloaded, cancellationToken);
     }
 
     private IQueryable<FlowInstance> LoadInstance()
@@ -657,8 +719,61 @@ public sealed class InstanceManagementService(
                 .ThenInclude(x => x.Tokens)
             .Include(x => x.FlowDefinition)
                 .ThenInclude(x => x.Steps)
+                    .ThenInclude(x => x.Fields)
+                        .ThenInclude(x => x.Options)
+            .Include(x => x.IntegrationAttempts)
             .Include(x => x.StepExecutions)
-                .ThenInclude(x => x.FlowStep);
+                .ThenInclude(x => x.FlowStep)
+                    .ThenInclude(x => x.Fields)
+                        .ThenInclude(x => x.Options);
+    }
+
+    private static Dictionary<string, JsonElement> MergeStepData(FlowInstance item, StepExecution current, Dictionary<string, JsonElement>? newData)
+    {
+        var instanceData = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(item.DataJson) ?? [];
+        var stepData = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(current.DataJson) ?? [];
+
+        foreach (var entry in instanceData)
+        {
+            stepData.TryAdd(entry.Key, entry.Value);
+        }
+
+        if (newData is not null)
+        {
+            foreach (var entry in newData)
+            {
+                stepData[entry.Key] = entry.Value;
+            }
+        }
+
+        return stepData;
+    }
+
+    private static void ValidateRequiredFields(StepExecution current, Dictionary<string, JsonElement> data)
+    {
+        var missing = current.FlowStep.Fields
+            .Where(x => x.Required)
+            .Where(x => !data.TryGetValue(x.Key, out var value)
+                || value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined
+                || string.IsNullOrWhiteSpace(value.ToString()))
+            .Select(x => x.Label)
+            .ToArray();
+
+        if (missing.Length > 0)
+        {
+            throw new AppValidationException(new Dictionary<string, string[]> { ["required"] = missing });
+        }
+    }
+
+    private static string MergeInstanceData(string instanceDataJson, Dictionary<string, JsonElement> stepData)
+    {
+        var data = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(instanceDataJson) ?? [];
+        foreach (var entry in stepData)
+        {
+            data[entry.Key] = entry.Value;
+        }
+
+        return JsonSerializer.Serialize(data);
     }
 
     private static void CompleteCurrentStep(FlowInstance item, StepExecution current, string? notes, Guid? completedByUserId)
@@ -688,8 +803,21 @@ public sealed class InstanceManagementService(
         item.UpdatedAt = now;
     }
 
-    private static InstanceDto ToDto(FlowInstance item)
+    private async Task<InstanceDto> ToDtoAsync(FlowInstance item, CancellationToken cancellationToken)
     {
+        var userIds = item.StepExecutions
+            .Where(x => x.CompletedByUserId.HasValue)
+            .Select(x => x.CompletedByUserId!.Value)
+            .Distinct()
+            .ToArray();
+
+        var userLookup = userIds.Length == 0
+            ? new Dictionary<Guid, string>()
+            : await db.Users
+                .AsNoTracking()
+                .Where(x => userIds.Contains(x.Id))
+                .ToDictionaryAsync(x => x.Id, x => x.Name, cancellationToken);
+
         return new InstanceDto(
             item.Id,
             item.FlowDefinitionId,
@@ -700,16 +828,41 @@ public sealed class InstanceManagementService(
             item.CreatedAt,
             item.UpdatedAt,
             JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(item.DataJson) ?? [],
+            item.StepExecutions.FirstOrDefault(x => x.Status == StepStatus.InProgress)?.Id,
             item.StepExecutions
                 .OrderBy(x => x.FlowStep.Order)
                 .Select(x => new StepProgressDto(
                     x.Id,
+                    x.FlowStepId,
                     x.FlowStep.Name,
                     x.FlowStep.Order,
                     x.FlowStep.Type,
                     x.Status,
                     x.StartedAt,
-                    x.CompletedAt))
+                    x.CompletedAt,
+                    x.CompletedByUserId,
+                    x.CompletedByUserId.HasValue && userLookup.TryGetValue(x.CompletedByUserId.Value, out var completedByName) ? completedByName : null,
+                    x.Notes,
+                    x.FlowStep.Type == StepType.Automatic || x.FlowStep.Type == StepType.ApiSend || x.FlowStep.Type == StepType.ApiQuery,
+                    JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(x.DataJson) ?? [],
+                    x.FlowStep.Fields
+                        .OrderBy(f => f.Order)
+                        .Select(f => new ExecutionFieldDto(
+                            f.Id,
+                            f.Key,
+                            f.Label,
+                            f.Type,
+                            f.Mask,
+                            f.Required,
+                            f.Order,
+                            f.Options.OrderBy(o => o.Order).Select(o => new FieldOptionDto(o.Id, o.Label, o.Value, o.Order)).ToList(),
+                            (JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(x.DataJson) ?? []).TryGetValue(f.Key, out var fieldValue) ? fieldValue.ToString() : null))
+                        .ToList(),
+                    item.IntegrationAttempts
+                        .Where(a => a.FlowStepId == x.FlowStepId)
+                        .OrderByDescending(a => a.CreatedAt)
+                        .Select(a => new IntegrationAttemptDto(a.Id, a.TriggerType.ToString(), a.Method, a.Url, a.ResponseStatusCode, a.Success, a.DurationMs, a.CreatedAt, a.ResponsePreview, a.ErrorMessage))
+                        .ToList()))
                 .ToList());
     }
 }
