@@ -89,6 +89,7 @@ public sealed class FlowInstance : Entity
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
     public List<StepExecution> StepExecutions { get; set; } = [];
     public List<IntegrationAttempt> IntegrationAttempts { get; set; } = [];
+    public List<StoredFile> StoredFiles { get; set; } = [];
 }
 
 public sealed class StepExecution : Entity
@@ -129,4 +130,42 @@ public sealed class AuditEntry : Entity
     public Guid EntityId { get; set; }
     public string Summary { get; set; } = "";
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+}
+
+public sealed class MinioConfiguration : Entity
+{
+    public string Endpoint { get; set; } = "";
+    public string AccessKey { get; set; } = "";
+    public string SecretKey { get; set; } = "";
+    public string PublicUrl { get; set; } = "";
+    public bool Active { get; set; } = true;
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
+    public List<MinioBucket> Buckets { get; set; } = [];
+}
+
+public sealed class MinioBucket : Entity
+{
+    public Guid MinioConfigurationId { get; set; }
+    public string Name { get; set; } = "";
+    public string BucketName { get; set; } = "";
+    public string? Description { get; set; }
+    public bool Active { get; set; } = true;
+    public bool IsDefault { get; set; } = true;
+}
+
+public sealed class StoredFile : Entity
+{
+    public Guid FlowInstanceId { get; set; }
+    public Guid StepExecutionId { get; set; }
+    public Guid MinioBucketId { get; set; }
+    public string FieldKey { get; set; } = "";
+    public string BucketName { get; set; } = "";
+    public string ObjectKey { get; set; } = "";
+    public string FileName { get; set; } = "";
+    public string ContentType { get; set; } = "";
+    public long Size { get; set; }
+    public bool IsPhoto { get; set; }
+    public Guid? UploadedByUserId { get; set; }
+    public DateTime UploadedAt { get; set; } = DateTime.UtcNow;
 }

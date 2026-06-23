@@ -820,7 +820,7 @@ public sealed class InstanceManagementService(
             throw new AppValidationException(new Dictionary<string, string[]> { ["file"] = ["O campo de foto aceita apenas imagens."] });
         }
 
-        var uploaded = await fileStorage.SaveStepFileAsync(id, current.Id, normalizedFieldKey, fileName, contentType ?? "application/octet-stream", stream, isPhoto, cancellationToken);
+        var uploaded = await fileStorage.SaveStepFileAsync(id, current.Id, normalizedFieldKey, fileName, contentType ?? "application/octet-stream", stream, isPhoto, actorUserId, cancellationToken);
 
         var mergedData = MergeStepData(item, current, null);
         var existingFiles = ReadUploadedFiles(mergedData, normalizedFieldKey);
@@ -992,7 +992,7 @@ public sealed class InstanceManagementService(
                     ? legacyIsPhotoProp.GetBoolean()
                     : false;
 
-            if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(fileName) || string.IsNullOrWhiteSpace(url))
+            if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(fileName))
             {
                 continue;
             }
@@ -1003,7 +1003,7 @@ public sealed class InstanceManagementService(
                 fileName,
                 contentType ?? "application/octet-stream",
                 size,
-                url,
+                url ?? string.Empty,
                 isPhoto,
                 DateTime.TryParse(uploadedAtText, out var uploadedAt) ? uploadedAt : DateTime.UtcNow));
         }
@@ -1053,6 +1053,28 @@ public sealed class InstanceManagementService(
                 .Where(x => userIds.Contains(x.Id))
                 .ToDictionaryAsync(x => x.Id, x => x.Name, cancellationToken);
 
+        var stepExecutionIds = item.StepExecutions.Select(x => x.Id).ToArray();
+        var storedFiles = stepExecutionIds.Length == 0
+            ? []
+            : await db.StoredFiles
+                .AsNoTracking()
+                .Where(x => stepExecutionIds.Contains(x.StepExecutionId))
+                .OrderBy(x => x.UploadedAt)
+                .ToListAsync(cancellationToken);
+
+        var storedFileDtos = new Dictionary<Guid, List<UploadedFileDto>>();
+        foreach (var file in storedFiles)
+        {
+            var url = await fileStorage.CreateReadUrlAsync(file.BucketName, file.ObjectKey, file.FileName, cancellationToken);
+            if (!storedFileDtos.TryGetValue(file.StepExecutionId, out var list))
+            {
+                list = [];
+                storedFileDtos[file.StepExecutionId] = list;
+            }
+
+            list.Add(new UploadedFileDto(file.Id.ToString(), file.FieldKey, file.FileName, file.ContentType, file.Size, url, file.IsPhoto, file.UploadedAt));
+        }
+
         return new InstanceDto(
             item.Id,
             item.FlowDefinitionId,
@@ -1066,38 +1088,54 @@ public sealed class InstanceManagementService(
             item.StepExecutions.FirstOrDefault(x => x.Status == StepStatus.InProgress)?.Id,
             item.StepExecutions
                 .OrderBy(x => x.FlowStep.Order)
-                .Select(x => new StepProgressDto(
-                    x.Id,
-                    x.FlowStepId,
-                    x.FlowStep.Name,
-                    x.FlowStep.Order,
-                    x.FlowStep.Type,
-                    x.Status,
-                    x.StartedAt,
-                    x.CompletedAt,
-                    x.CompletedByUserId,
-                    x.CompletedByUserId.HasValue && userLookup.TryGetValue(x.CompletedByUserId.Value, out var completedByName) ? completedByName : null,
-                    x.Notes,
-                    x.FlowStep.Type == StepType.Automatic || x.FlowStep.Type == StepType.ApiSend || x.FlowStep.Type == StepType.ApiQuery,
-                    JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(x.DataJson) ?? [],
-                    x.FlowStep.Fields
-                        .OrderBy(f => f.Order)
-                        .Select(f => new ExecutionFieldDto(
-                            f.Id,
-                            f.Key,
-                            f.Label,
-                            f.Type,
-                            f.Mask,
-                            f.Required,
-                            f.Order,
-                            f.Options.OrderBy(o => o.Order).Select(o => new FieldOptionDto(o.Id, o.Label, o.Value, o.Order)).ToList(),
-                            (JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(x.DataJson) ?? []).TryGetValue(f.Key, out var fieldValue) ? fieldValue.ToString() : null))
-                        .ToList(),
-                    item.IntegrationAttempts
-                        .Where(a => a.FlowStepId == x.FlowStepId)
-                        .OrderByDescending(a => a.CreatedAt)
-                        .Select(a => new IntegrationAttemptDto(a.Id, a.TriggerType.ToString(), a.Method, a.Url, a.ResponseStatusCode, a.Success, a.DurationMs, a.CreatedAt, a.ResponsePreview, a.ErrorMessage))
-                        .ToList()))
+                .Select(x =>
+                {
+                    var rawData = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(x.DataJson) ?? [];
+                    var enrichedData = new Dictionary<string, JsonElement>(rawData, StringComparer.OrdinalIgnoreCase);
+
+                    if (storedFileDtos.TryGetValue(x.Id, out var stepFiles))
+                    {
+                        foreach (var groupedFile in stepFiles.GroupBy(file => file.FieldKey, StringComparer.OrdinalIgnoreCase))
+                        {
+                            enrichedData[groupedFile.Key] = JsonSerializer.SerializeToElement(groupedFile.ToList());
+                        }
+                    }
+
+                    return new StepProgressDto(
+                        x.Id,
+                        x.FlowStepId,
+                        x.FlowStep.Name,
+                        x.FlowStep.Order,
+                        x.FlowStep.Type,
+                        x.Status,
+                        x.StartedAt,
+                        x.CompletedAt,
+                        x.CompletedByUserId,
+                        x.CompletedByUserId.HasValue && userLookup.TryGetValue(x.CompletedByUserId.Value, out var completedByName) ? completedByName : null,
+                        x.Notes,
+                        x.FlowStep.Type == StepType.Automatic || x.FlowStep.Type == StepType.ApiSend || x.FlowStep.Type == StepType.ApiQuery,
+                        enrichedData,
+                        x.FlowStep.Fields
+                            .OrderBy(f => f.Order)
+                            .Select(f => new ExecutionFieldDto(
+                                f.Id,
+                                f.Key,
+                                f.Label,
+                                f.Type,
+                                f.Mask,
+                                f.Required,
+                                f.Order,
+                                f.Options.OrderBy(o => o.Order).Select(o => new FieldOptionDto(o.Id, o.Label, o.Value, o.Order)).ToList(),
+                                f.Type is FieldType.Attachment or FieldType.Photo or FieldType.Document
+                                    ? string.Join(", ", (storedFileDtos.TryGetValue(x.Id, out var uploadFiles) ? uploadFiles.Where(file => string.Equals(file.FieldKey, f.Key, StringComparison.OrdinalIgnoreCase)).Select(file => file.FileName) : Enumerable.Empty<string>()).ToArray())
+                                    : rawData.TryGetValue(f.Key, out var fieldValue) ? fieldValue.ToString() : null))
+                            .ToList(),
+                        item.IntegrationAttempts
+                            .Where(a => a.FlowStepId == x.FlowStepId)
+                            .OrderByDescending(a => a.CreatedAt)
+                            .Select(a => new IntegrationAttemptDto(a.Id, a.TriggerType.ToString(), a.Method, a.Url, a.ResponseStatusCode, a.Success, a.DurationMs, a.CreatedAt, a.ResponsePreview, a.ErrorMessage))
+                            .ToList());
+                })
                 .ToList());
     }
 }

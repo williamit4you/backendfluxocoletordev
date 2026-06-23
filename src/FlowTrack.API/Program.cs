@@ -1,7 +1,6 @@
 using Microsoft.OpenApi.Models;
 using FlowTrack.API.Infrastructure;
 using FlowTrack.IoC;
-using Microsoft.Extensions.FileProviders;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -51,16 +50,9 @@ builder.Services.AddCors(options =>
         policy.WithOrigins(origins).AllowAnyHeader().AllowAnyMethod()));
 
 var app = builder.Build();
-var uploadsPath = Path.Combine(app.Environment.ContentRootPath, "uploads");
-Directory.CreateDirectory(uploadsPath);
 
 app.UseSwagger();
 app.UseSwaggerUI();
-app.UseStaticFiles(new StaticFileOptions
-{
-    FileProvider = new PhysicalFileProvider(uploadsPath),
-    RequestPath = "/uploads"
-});
 
 app.UseCors();
 app.UseAuthentication();

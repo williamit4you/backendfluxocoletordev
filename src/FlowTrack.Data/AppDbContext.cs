@@ -16,6 +16,9 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
     public DbSet<StepExecution> StepExecutions => Set<StepExecution>();
     public DbSet<IntegrationAttempt> IntegrationAttempts => Set<IntegrationAttempt>();
     public DbSet<AuditEntry> AuditEntries => Set<AuditEntry>();
+    public DbSet<MinioConfiguration> MinioConfigurationEntries => Set<MinioConfiguration>();
+    public DbSet<MinioBucket> MinioBucketEntries => Set<MinioBucket>();
+    public DbSet<StoredFile> StoredFileEntries => Set<StoredFile>();
     public IQueryable<AppUser> Users => AppUsers;
     public IQueryable<FlowDefinition> Flows => FlowDefinitions;
     public IQueryable<FlowInstance> Instances => FlowInstances;
@@ -26,6 +29,9 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
     IQueryable<StepExecution> IAppDbContext.StepExecutions => StepExecutions;
     IQueryable<IntegrationAttempt> IAppDbContext.IntegrationAttempts => IntegrationAttempts;
     IQueryable<AuditEntry> IAppDbContext.AuditEntries => AuditEntries;
+    IQueryable<MinioConfiguration> IAppDbContext.MinioConfigurations => MinioConfigurationEntries;
+    IQueryable<MinioBucket> IAppDbContext.MinioBuckets => MinioBucketEntries;
+    IQueryable<StoredFile> IAppDbContext.StoredFiles => StoredFileEntries;
     public new void Add<T>(T entity) where T : class => Set<T>().Add(entity);
     public void RemoveRange<T>(IEnumerable<T> entities) where T : class => Set<T>().RemoveRange(entities);
 
@@ -45,9 +51,14 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
         b.Entity<StepField>().HasMany(x => x.Options).WithOne().HasForeignKey(x => x.StepFieldId).OnDelete(DeleteBehavior.Cascade);
         b.Entity<FlowInstance>().HasMany(x => x.StepExecutions).WithOne().HasForeignKey(x => x.FlowInstanceId).OnDelete(DeleteBehavior.Cascade);
         b.Entity<FlowInstance>().HasMany(x => x.IntegrationAttempts).WithOne().HasForeignKey(x => x.FlowInstanceId).OnDelete(DeleteBehavior.Cascade);
+        b.Entity<FlowInstance>().HasMany(x => x.StoredFiles).WithOne().HasForeignKey(x => x.FlowInstanceId).OnDelete(DeleteBehavior.Cascade);
         b.Entity<StepExecution>().HasOne(x => x.FlowStep).WithMany().HasForeignKey(x => x.FlowStepId).OnDelete(DeleteBehavior.Restrict);
+        b.Entity<MinioConfiguration>().HasMany(x => x.Buckets).WithOne().HasForeignKey(x => x.MinioConfigurationId).OnDelete(DeleteBehavior.Cascade);
         b.Entity<IntegrationAttempt>().HasIndex(x => x.FlowInstanceId);
         b.Entity<IntegrationAttempt>().HasIndex(x => x.FlowStepId);
+        b.Entity<MinioBucket>().HasIndex(x => new { x.MinioConfigurationId, x.BucketName }).IsUnique();
+        b.Entity<StoredFile>().HasIndex(x => x.StepExecutionId);
+        b.Entity<StoredFile>().HasIndex(x => new { x.StepExecutionId, x.FieldKey });
         b.Entity<AuditEntry>().HasIndex(x => x.CreatedAt);
         b.Entity<FlowDefinition>().Property(x => x.Name).HasMaxLength(160);
         b.Entity<FlowInstance>().Property(x => x.Code).HasMaxLength(120);
@@ -64,6 +75,18 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
         b.Entity<IntegrationAttempt>().Property(x => x.ResponsePreview).HasMaxLength(2000);
         b.Entity<IntegrationAttempt>().Property(x => x.ErrorMessage).HasMaxLength(1000);
         b.Entity<StepExecution>().Property(x => x.DataJson).HasColumnType("text");
+        b.Entity<MinioConfiguration>().Property(x => x.Endpoint).HasMaxLength(500);
+        b.Entity<MinioConfiguration>().Property(x => x.AccessKey).HasMaxLength(2000);
+        b.Entity<MinioConfiguration>().Property(x => x.SecretKey).HasMaxLength(2000);
+        b.Entity<MinioConfiguration>().Property(x => x.PublicUrl).HasMaxLength(500);
+        b.Entity<MinioBucket>().Property(x => x.Name).HasMaxLength(160);
+        b.Entity<MinioBucket>().Property(x => x.BucketName).HasMaxLength(160);
+        b.Entity<MinioBucket>().Property(x => x.Description).HasMaxLength(500);
+        b.Entity<StoredFile>().Property(x => x.FieldKey).HasMaxLength(120);
+        b.Entity<StoredFile>().Property(x => x.BucketName).HasMaxLength(160);
+        b.Entity<StoredFile>().Property(x => x.ObjectKey).HasMaxLength(1000);
+        b.Entity<StoredFile>().Property(x => x.FileName).HasMaxLength(260);
+        b.Entity<StoredFile>().Property(x => x.ContentType).HasMaxLength(200);
         b.Entity<AuditEntry>().Property(x => x.Category).HasMaxLength(80);
         b.Entity<AuditEntry>().Property(x => x.Action).HasMaxLength(80);
         b.Entity<AuditEntry>().Property(x => x.EntityType).HasMaxLength(80);

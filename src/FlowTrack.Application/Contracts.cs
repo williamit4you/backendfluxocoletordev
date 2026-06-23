@@ -12,6 +12,9 @@ public record UpdateUserRequest(string Name, string Role, bool Active, string? P
 public record FieldOptionDto(Guid? Id, string Label, string Value, int Order);
 public record FieldDto(Guid? Id, string Key, string Label, FieldType Type, string? Mask, bool Required, int Order, IReadOnlyList<FieldOptionDto> Options);
 public record FlowTokenDto(Guid? Id, string Name, string? Value, TokenType Type, string? HeaderName, bool Active);
+public record MinioBucketDto(Guid? Id, string Name, string BucketName, string? Description, bool Active, bool IsDefault);
+public record MinioConfigurationDto(Guid? Id, string Endpoint, string AccessKey, string SecretKey, string PublicUrl, bool Active, IReadOnlyList<MinioBucketDto> Buckets);
+public record SaveMinioConfigurationRequest(string Endpoint, string AccessKey, string SecretKey, string PublicUrl, bool Active, IReadOnlyList<MinioBucketDto> Buckets);
 public record ResponseFieldMappingDto(string FieldKey, string ResponsePath);
 public record BodyFieldMappingDto(string TargetKey, string SourceReference);
 public record StepScheduleAssistDto(int? IntervalMinutes = null, string? CronExpression = null, string? HelperText = null);
@@ -43,6 +46,9 @@ public interface IAppDbContext
     IQueryable<StepExecution> StepExecutions { get; }
     IQueryable<IntegrationAttempt> IntegrationAttempts { get; }
     IQueryable<AuditEntry> AuditEntries { get; }
+    IQueryable<MinioConfiguration> MinioConfigurations { get; }
+    IQueryable<MinioBucket> MinioBuckets { get; }
+    IQueryable<StoredFile> StoredFiles { get; }
     void Add<T>(T entity) where T : class;
     void RemoveRange<T>(IEnumerable<T> entities) where T : class;
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
@@ -76,9 +82,15 @@ public interface IAuditService
 {
     Task WriteAsync(string category, string action, string entityType, Guid entityId, string summary, Guid? actorUserId, CancellationToken cancellationToken);
 }
+public interface IPlatformConfigurationService
+{
+    Task<MinioConfigurationDto> GetMinioAsync(CancellationToken cancellationToken);
+    Task<MinioConfigurationDto> SaveMinioAsync(SaveMinioConfigurationRequest request, Guid? actorUserId, CancellationToken cancellationToken);
+}
 public interface IFileStorageService
 {
-    Task<UploadedFileDto> SaveStepFileAsync(Guid instanceId, Guid stepExecutionId, string fieldKey, string fileName, string contentType, Stream stream, bool isPhoto, CancellationToken cancellationToken);
+    Task<UploadedFileDto> SaveStepFileAsync(Guid instanceId, Guid stepExecutionId, string fieldKey, string fileName, string contentType, Stream stream, bool isPhoto, Guid? actorUserId, CancellationToken cancellationToken);
+    Task<string> CreateReadUrlAsync(string bucketName, string objectKey, string fileName, CancellationToken cancellationToken);
 }
 public interface IWorkerMonitor
 {

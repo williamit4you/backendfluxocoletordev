@@ -40,7 +40,8 @@ public static class DependencyInjection
         services.AddScoped<IAuthService, AuthService>();
         services.AddScoped<ITokenProtectionService, TokenProtectionService>();
         services.AddScoped<IAuditService, AuditService>();
-        services.AddScoped<IFileStorageService, LocalFileStorageService>();
+        services.AddScoped<IPlatformConfigurationService, PlatformConfigurationService>();
+        services.AddScoped<IFileStorageService, MinioFileStorageService>();
         services.AddScoped<IFlowManagementService, FlowManagementService>();
         services.AddScoped<IUserManagementService, UserManagementService>();
         services.AddScoped<IInstanceManagementService, InstanceManagementService>();
@@ -580,50 +581,6 @@ internal sealed class AuditService(AppDbContext db) : IAuditService
         });
 
         await db.SaveChangesAsync(cancellationToken);
-    }
-}
-
-internal sealed class LocalFileStorageService(IHostEnvironment environment) : IFileStorageService
-{
-    private const long AttachmentMaxBytes = 10 * 1024 * 1024;
-    private const long PhotoMaxBytes = 5 * 1024 * 1024;
-
-    public async Task<UploadedFileDto> SaveStepFileAsync(Guid instanceId, Guid stepExecutionId, string fieldKey, string fileName, string contentType, Stream stream, bool isPhoto, CancellationToken cancellationToken)
-    {
-        if (string.IsNullOrWhiteSpace(fileName))
-        {
-            throw new AppValidationException(new Dictionary<string, string[]> { ["file"] = ["Arquivo nao informado."] });
-        }
-
-        var safeExtension = Path.GetExtension(fileName);
-        var safeName = $"{Guid.NewGuid():N}{safeExtension}";
-        var relativeFolder = Path.Combine("uploads", "instances", instanceId.ToString("N"), stepExecutionId.ToString("N"), fieldKey);
-        var absoluteFolder = Path.Combine(environment.ContentRootPath, relativeFolder);
-        Directory.CreateDirectory(absoluteFolder);
-
-        var absolutePath = Path.Combine(absoluteFolder, safeName);
-        await using var output = File.Create(absolutePath);
-        await stream.CopyToAsync(output, cancellationToken);
-        await output.FlushAsync(cancellationToken);
-
-        var size = new FileInfo(absolutePath).Length;
-        var limit = isPhoto ? PhotoMaxBytes : AttachmentMaxBytes;
-        if (size <= 0 || size > limit)
-        {
-            File.Delete(absolutePath);
-            throw new AppValidationException(new Dictionary<string, string[]> { ["file"] = [$"O arquivo excede o limite permitido de {(isPhoto ? "5 MB" : "10 MB")}."] });
-        }
-
-        var relativePath = $"/{Path.Combine(relativeFolder, safeName).Replace('\\', '/')}";
-        return new UploadedFileDto(
-            Guid.NewGuid().ToString("N"),
-            fieldKey,
-            fileName,
-            string.IsNullOrWhiteSpace(contentType) ? "application/octet-stream" : contentType,
-            size,
-            relativePath,
-            isPhoto,
-            DateTime.UtcNow);
     }
 }
 

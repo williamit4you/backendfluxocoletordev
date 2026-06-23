@@ -12,6 +12,7 @@ internal static class SeedData
         await using var scope = services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         var passwords = scope.ServiceProvider.GetRequiredService<FlowTrack.Application.IPasswordService>();
+        var tokenProtection = scope.ServiceProvider.GetRequiredService<FlowTrack.Application.ITokenProtectionService>();
 
         await db.Database.MigrateAsync();
 
@@ -85,6 +86,47 @@ internal static class SeedData
             {
                 field.Mask = "cnpj";
             }
+        }
+
+        var minioConfig = await db.MinioConfigurationEntries
+            .Include(x => x.Buckets)
+            .OrderByDescending(x => x.UpdatedAt)
+            .FirstOrDefaultAsync();
+
+        if (minioConfig is null)
+        {
+            minioConfig = new MinioConfiguration
+            {
+                Endpoint = "https://desenvolvimento-minio.ykzlki.easypanel.host",
+                PublicUrl = "https://desenvolvimento-minio.ykzlki.easypanel.host",
+                AccessKey = tokenProtection.Protect("admin"),
+                SecretKey = tokenProtection.Protect("VgrZtPnAiHmmUjEn"),
+                Active = true,
+                Buckets =
+                [
+                    new MinioBucket
+                    {
+                        Name = "Anexos gerais",
+                        BucketName = "coletoranexo",
+                        Description = "Bucket unico para anexos e fotos do FlowTrack.",
+                        Active = true,
+                        IsDefault = true
+                    }
+                ]
+            };
+
+            db.MinioConfigurationEntries.Add(minioConfig);
+        }
+        else if (!minioConfig.Buckets.Any())
+        {
+            minioConfig.Buckets.Add(new MinioBucket
+            {
+                Name = "Anexos gerais",
+                BucketName = "coletoranexo",
+                Description = "Bucket unico para anexos e fotos do FlowTrack.",
+                Active = true,
+                IsDefault = true
+            });
         }
 
         await db.SaveChangesAsync();
