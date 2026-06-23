@@ -225,6 +225,11 @@ internal sealed class IntegrationExecutionService(
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
+        if (config.BodyMappings is not null && config.BodyMappings.Count > 0)
+        {
+            return BuildCustomApiSendPayload(config.BodyMappings, data);
+        }
+
         if (selectedKeys is null || selectedKeys.Count == 0)
         {
             return data;
@@ -233,6 +238,84 @@ internal sealed class IntegrationExecutionService(
         return data
             .Where(entry => selectedKeys.Contains(entry.Key, StringComparer.OrdinalIgnoreCase))
             .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static Dictionary<string, JsonElement> BuildCustomApiSendPayload(IReadOnlyList<BodyFieldMappingDto> mappings, Dictionary<string, JsonElement> data)
+    {
+        var payload = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var mapping in mappings)
+        {
+            if (string.IsNullOrWhiteSpace(mapping.TargetKey) || string.IsNullOrWhiteSpace(mapping.SourceReference))
+            {
+                continue;
+            }
+
+            SetNestedValue(payload, mapping.TargetKey.Trim(), ConvertJsonElementToObject(ResolveSourceReference(mapping.SourceReference.Trim(), data)));
+        }
+
+        return payload.ToDictionary(entry => entry.Key, entry => JsonSerializer.SerializeToElement(entry.Value), StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static void SetNestedValue(Dictionary<string, object?> target, string path, object? value)
+    {
+        var segments = path.Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (segments.Length == 0)
+        {
+            return;
+        }
+
+        Dictionary<string, object?> current = target;
+        for (var index = 0; index < segments.Length - 1; index++)
+        {
+            var segment = segments[index];
+            if (!current.TryGetValue(segment, out var existing) || existing is not Dictionary<string, object?> nested)
+            {
+                nested = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                current[segment] = nested;
+            }
+
+            current = nested;
+        }
+
+        current[segments[^1]] = value;
+    }
+
+    private static object? ConvertJsonElementToObject(JsonElement element)
+    {
+        return element.ValueKind switch
+        {
+            JsonValueKind.String => element.GetString(),
+            JsonValueKind.Number when element.TryGetInt64(out var longValue) => longValue,
+            JsonValueKind.Number when element.TryGetDecimal(out var decimalValue) => decimalValue,
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            JsonValueKind.Null or JsonValueKind.Undefined => null,
+            _ => JsonSerializer.Deserialize<object>(element.GetRawText())
+        };
+    }
+
+    private static JsonElement ResolveSourceReference(string sourceReference, Dictionary<string, JsonElement> data)
+    {
+        var exactMatch = Regex.Match(sourceReference, @"^\{\{(?<key>[^}]+)\}\}$");
+        if (exactMatch.Success)
+        {
+            var key = exactMatch.Groups["key"].Value.Trim();
+            if (data.TryGetValue(key, out var jsonValue))
+            {
+                return jsonValue;
+            }
+
+            return JsonSerializer.SerializeToElement(string.Empty);
+        }
+
+        var resolvedText = sourceReference;
+        foreach (var entry in data)
+        {
+            resolvedText = resolvedText.Replace($"{{{{{entry.Key}}}}}", entry.Value.ToString(), StringComparison.OrdinalIgnoreCase);
+        }
+
+        return JsonSerializer.SerializeToElement(resolvedText);
     }
 
     private static Dictionary<string, JsonElement>? MapResponseData(StepApiConfigDto config, string responseText)
