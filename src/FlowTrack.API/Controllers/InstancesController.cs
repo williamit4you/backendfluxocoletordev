@@ -86,6 +86,29 @@ public sealed class InstancesController(IInstanceManagementService instances) : 
         }
     }
 
+    [HttpPost("{id:guid}/upload")]
+    [RequestSizeLimit(10_000_000)]
+    public async Task<ActionResult<InstanceDto>> Upload(Guid id, [FromForm] string fieldKey, [FromForm] IFormFile file)
+    {
+        try
+        {
+            await using var stream = file.OpenReadStream();
+            return Ok(await instances.UploadCurrentStepFileAsync(id, fieldKey, file.FileName, file.ContentType, stream, TryGetCurrentUserId(), HttpContext.RequestAborted));
+        }
+        catch (AppValidationException ex)
+        {
+            return BadRequest(new ValidationProblemDetails(ex.Errors));
+        }
+        catch (AppNotFoundException)
+        {
+            return NotFound();
+        }
+        catch (AppConflictException ex)
+        {
+            return Conflict(new { message = ex.Message });
+        }
+    }
+
     [HttpPost("{id:guid}/retry-integration")]
     public async Task<ActionResult<InstanceDto>> RetryIntegration(Guid id)
     {

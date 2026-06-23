@@ -22,6 +22,7 @@ public record IntegrationAttemptDto(Guid Id, string TriggerType, string Method, 
 public record IntegrationTestRequest(Dictionary<string, JsonElement> Data);
 public record IntegrationTestResponse(bool Success, int? StatusCode, int DurationMs, string Url, string Method, string? ResponsePreview, string? ErrorMessage, Dictionary<string, string>? MappedFields = null);
 public record IntegrationExecutionResult(bool Success, int? StatusCode, int DurationMs, string Url, string Method, string? ResponsePreview, string? ErrorMessage, Dictionary<string, JsonElement>? MappedData = null);
+public record UploadedFileDto(string Id, string FieldKey, string FileName, string ContentType, long Size, string Url, bool IsPhoto, DateTime UploadedAt);
 public record CreateInstanceRequest(Guid FlowDefinitionId, string? Code, Dictionary<string, JsonElement> Data);
 public record AdvanceStepRequest(string? Notes, Dictionary<string, JsonElement>? Data = null);
 public record ExecutionFieldDto(Guid? Id, string Key, string Label, FieldType Type, string? Mask, bool Required, int Order, IReadOnlyList<FieldOptionDto> Options, string? Value);
@@ -74,6 +75,10 @@ public interface IAuditService
 {
     Task WriteAsync(string category, string action, string entityType, Guid entityId, string summary, Guid? actorUserId, CancellationToken cancellationToken);
 }
+public interface IFileStorageService
+{
+    Task<UploadedFileDto> SaveStepFileAsync(Guid instanceId, Guid stepExecutionId, string fieldKey, string fileName, string contentType, Stream stream, bool isPhoto, CancellationToken cancellationToken);
+}
 public interface IWorkerMonitor
 {
     DateTime? LastRunAtUtc { get; }
@@ -108,6 +113,7 @@ public interface IInstanceManagementService
     Task<InstanceDto> GetByIdAsync(Guid id, CancellationToken cancellationToken);
     Task<Guid> CreateAsync(CreateInstanceRequest request, CancellationToken cancellationToken);
     Task<InstanceDto> SaveCurrentStepDataAsync(Guid id, Dictionary<string, JsonElement> data, string? notes, Guid? actorUserId, CancellationToken cancellationToken);
+    Task<InstanceDto> UploadCurrentStepFileAsync(Guid id, string fieldKey, string fileName, string? contentType, Stream stream, Guid? actorUserId, CancellationToken cancellationToken);
     Task AdvanceAsync(Guid id, AdvanceStepRequest request, Guid? actorUserId, CancellationToken cancellationToken);
     Task<InstanceDto> RetryIntegrationAsync(Guid id, CancellationToken cancellationToken);
 }

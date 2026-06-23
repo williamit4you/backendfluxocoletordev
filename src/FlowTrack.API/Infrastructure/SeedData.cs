@@ -48,13 +48,13 @@ internal static class SeedData
                         Order = 1,
                         Fields =
                         [
-                            new() { Key = "chaveAcesso", Label = "Chave de acesso", Type = FieldType.Document, Required = true, Order = 1 },
+                            new() { Key = "chaveAcesso", Label = "Chave de acesso", Type = FieldType.Text, Required = true, Order = 1 },
                             new() { Key = "numeroNfe", Label = "Número da NF-e", Type = FieldType.Text, Required = true, Order = 2 },
                             new() { Key = "serie", Label = "Série", Type = FieldType.Text, Required = false, Order = 3 },
                             new() { Key = "emitente", Label = "Emitente", Type = FieldType.Text, Required = false, Order = 4 },
-                            new() { Key = "cnpjEmitente", Label = "CNPJ do emitente", Type = FieldType.Document, Required = false, Order = 5 },
+                            new() { Key = "cnpjEmitente", Label = "CNPJ do emitente", Type = FieldType.Text, Mask = "cnpj", Required = false, Order = 5 },
                             new() { Key = "destinatario", Label = "Destinatário", Type = FieldType.Text, Required = false, Order = 6 },
-                            new() { Key = "cnpjDestinatario", Label = "CNPJ do destinatário", Type = FieldType.Document, Required = false, Order = 7 },
+                            new() { Key = "cnpjDestinatario", Label = "CNPJ do destinatário", Type = FieldType.Text, Mask = "cnpj", Required = false, Order = 7 },
                             new() { Key = "dataEmissao", Label = "Data de emissão", Type = FieldType.Date, Required = false, Order = 8 },
                             new() { Key = "valorTotal", Label = "Valor total", Type = FieldType.Number, Required = false, Order = 9 },
                             new() { Key = "placa", Label = "Placa", Type = FieldType.Text, Required = false, Order = 10 },
@@ -71,6 +71,20 @@ internal static class SeedData
             };
 
             db.FlowDefinitions.Add(flow);
+        }
+
+        var legacyFields = await db.StepFields
+            .Where(x => x.Key == "chaveAcesso" || x.Key == "cnpjEmitente" || x.Key == "cnpjDestinatario")
+            .ToListAsync();
+
+        foreach (var field in legacyFields)
+        {
+            field.Type = FieldType.Text;
+
+            if (field.Key.Contains("cnpj", StringComparison.OrdinalIgnoreCase))
+            {
+                field.Mask = "cnpj";
+            }
         }
 
         await db.SaveChangesAsync();

@@ -531,7 +531,8 @@ public sealed class UserManagementService(
 
 public sealed class InstanceManagementService(
     IAppDbContext db,
-    IInstanceAutomationService automation) : IInstanceManagementService
+    IInstanceAutomationService automation,
+    IFileStorageService fileStorage) : IInstanceManagementService
 {
     public async Task<IReadOnlyList<InstanceDto>> GetAllAsync(Guid? flowId, string? status, string? search, CancellationToken cancellationToken)
     {
@@ -596,6 +597,7 @@ public sealed class InstanceManagementService(
         {
             var missing = firstStep.Fields
                 .Where(x => x.Required)
+                .Where(x => x.Type != FieldType.Document && x.Type != FieldType.Attachment && x.Type != FieldType.Photo)
                 .Where(x => !request.Data.TryGetValue(x.Key, out var value)
                     || value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined
                     || string.IsNullOrWhiteSpace(value.ToString()))
@@ -662,6 +664,60 @@ public sealed class InstanceManagementService(
 
         current.DataJson = JsonSerializer.Serialize(mergedData);
         current.Notes = notes;
+        item.DataJson = MergeInstanceData(item.DataJson, mergedData);
+        item.UpdatedAt = DateTime.UtcNow;
+
+        await db.SaveChangesAsync(cancellationToken);
+
+        var reloaded = await LoadInstance().AsNoTracking().SingleAsync(x => x.Id == id, cancellationToken);
+        return await ToDtoAsync(reloaded, cancellationToken);
+    }
+
+    public async Task<InstanceDto> UploadCurrentStepFileAsync(Guid id, string fieldKey, string fileName, string? contentType, Stream stream, Guid? actorUserId, CancellationToken cancellationToken)
+    {
+        var item = await LoadInstance().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
+            ?? throw new AppNotFoundException("Execucao nao encontrada.");
+
+        if (item.Status != InstanceStatus.InProgress)
+        {
+            throw new AppConflictException("Execucao nao esta em andamento.");
+        }
+
+        var current = item.StepExecutions.SingleOrDefault(x => x.Status == StepStatus.InProgress);
+        if (current is null)
+        {
+            throw new AppConflictException("Nenhuma etapa ativa encontrada.");
+        }
+
+        if (current.FlowStep.Type == StepType.ApiSend || current.FlowStep.Type == StepType.ApiQuery || current.FlowStep.Type == StepType.Automatic)
+        {
+            throw new AppConflictException("A etapa atual eh automatica e nao aceita anexos manuais.");
+        }
+
+        var normalizedFieldKey = fieldKey.Trim();
+        var field = current.FlowStep.Fields.SingleOrDefault(x => string.Equals(x.Key, normalizedFieldKey, StringComparison.OrdinalIgnoreCase))
+            ?? throw new AppValidationException(new Dictionary<string, string[]> { ["fieldKey"] = ["Campo da etapa nao encontrado."] });
+
+        var isPhoto = field.Type == FieldType.Photo;
+        var isAttachment = field.Type == FieldType.Attachment || field.Type == FieldType.Document;
+        if (!isPhoto && !isAttachment)
+        {
+            throw new AppValidationException(new Dictionary<string, string[]> { ["fieldKey"] = ["O campo informado nao aceita upload de arquivos."] });
+        }
+
+        if (isPhoto && !string.IsNullOrWhiteSpace(contentType) && !contentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new AppValidationException(new Dictionary<string, string[]> { ["file"] = ["O campo de foto aceita apenas imagens."] });
+        }
+
+        var uploaded = await fileStorage.SaveStepFileAsync(id, current.Id, normalizedFieldKey, fileName, contentType ?? "application/octet-stream", stream, isPhoto, cancellationToken);
+
+        var mergedData = MergeStepData(item, current, null);
+        var existingFiles = ReadUploadedFiles(mergedData, normalizedFieldKey);
+        existingFiles.Add(uploaded);
+        mergedData[normalizedFieldKey] = JsonSerializer.SerializeToElement(existingFiles);
+
+        current.DataJson = JsonSerializer.Serialize(mergedData);
         item.DataJson = MergeInstanceData(item.DataJson, mergedData);
         item.UpdatedAt = DateTime.UtcNow;
 
@@ -753,9 +809,7 @@ public sealed class InstanceManagementService(
     {
         var missing = current.FlowStep.Fields
             .Where(x => x.Required)
-            .Where(x => !data.TryGetValue(x.Key, out var value)
-                || value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined
-                || string.IsNullOrWhiteSpace(value.ToString()))
+            .Where(x => IsMissingRequiredValue(x, data))
             .Select(x => x.Label)
             .ToArray();
 
@@ -774,6 +828,77 @@ public sealed class InstanceManagementService(
         }
 
         return JsonSerializer.Serialize(data);
+    }
+
+    private static bool IsMissingRequiredValue(StepField field, Dictionary<string, JsonElement> data)
+    {
+        if (!data.TryGetValue(field.Key, out var value) || value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            return true;
+        }
+
+        if (field.Type is FieldType.Document or FieldType.Attachment or FieldType.Photo)
+        {
+            return value.ValueKind != JsonValueKind.Array || value.GetArrayLength() == 0;
+        }
+
+        return string.IsNullOrWhiteSpace(value.ToString());
+    }
+
+    private static List<UploadedFileDto> ReadUploadedFiles(Dictionary<string, JsonElement> data, string fieldKey)
+    {
+        if (!data.TryGetValue(fieldKey, out var value) || value.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var files = new List<UploadedFileDto>();
+        foreach (var item in value.EnumerateArray())
+        {
+            var id = item.TryGetProperty("id", out var idProp) ? idProp.GetString()
+                : item.TryGetProperty("Id", out var legacyIdProp) ? legacyIdProp.GetString()
+                : null;
+            var fileName = item.TryGetProperty("fileName", out var fileNameProp) ? fileNameProp.GetString()
+                : item.TryGetProperty("FileName", out var legacyFileNameProp) ? legacyFileNameProp.GetString()
+                : null;
+            var contentType = item.TryGetProperty("contentType", out var contentTypeProp) ? contentTypeProp.GetString()
+                : item.TryGetProperty("ContentType", out var legacyContentTypeProp) ? legacyContentTypeProp.GetString()
+                : null;
+            var url = item.TryGetProperty("url", out var urlProp) ? urlProp.GetString()
+                : item.TryGetProperty("Url", out var legacyUrlProp) ? legacyUrlProp.GetString()
+                : null;
+            var uploadedAtText = item.TryGetProperty("uploadedAt", out var uploadedAtProp) ? uploadedAtProp.GetString()
+                : item.TryGetProperty("UploadedAt", out var legacyUploadedAtProp) ? legacyUploadedAtProp.GetString()
+                : null;
+            var fieldKeyValue = item.TryGetProperty("fieldKey", out var fieldKeyProp) ? fieldKeyProp.GetString()
+                : item.TryGetProperty("FieldKey", out var legacyFieldKeyProp) ? legacyFieldKeyProp.GetString()
+                : fieldKey;
+            var size = item.TryGetProperty("size", out var sizeProp) && sizeProp.TryGetInt64(out var parsedSize) ? parsedSize
+                : item.TryGetProperty("Size", out var legacySizeProp) && legacySizeProp.TryGetInt64(out var parsedLegacySize) ? parsedLegacySize
+                : 0;
+            var isPhoto = item.TryGetProperty("isPhoto", out var isPhotoProp) && isPhotoProp.ValueKind is JsonValueKind.True or JsonValueKind.False
+                ? isPhotoProp.GetBoolean()
+                : item.TryGetProperty("IsPhoto", out var legacyIsPhotoProp) && legacyIsPhotoProp.ValueKind is JsonValueKind.True or JsonValueKind.False
+                    ? legacyIsPhotoProp.GetBoolean()
+                    : false;
+
+            if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(fileName) || string.IsNullOrWhiteSpace(url))
+            {
+                continue;
+            }
+
+            files.Add(new UploadedFileDto(
+                id,
+                fieldKeyValue ?? fieldKey,
+                fileName,
+                contentType ?? "application/octet-stream",
+                size,
+                url,
+                isPhoto,
+                DateTime.TryParse(uploadedAtText, out var uploadedAt) ? uploadedAt : DateTime.UtcNow));
+        }
+
+        return files;
     }
 
     private static void CompleteCurrentStep(FlowInstance item, StepExecution current, string? notes, Guid? completedByUserId)
