@@ -3,7 +3,7 @@ namespace FlowTrack.Domain;
 public enum UserRole { SuperAdmin, Admin, User }
 public enum EntryType { Manual, Reader, Automatic, ApiSend, ApiQuery }
 public enum StepType { Reader, UserTask, ExternalMonitor, Automatic, ApiSend, ApiQuery }
-public enum FieldType { Text, Number, Date, Document, Email, Select }
+public enum FieldType { Text, Number, Date, Document, Email, Select, Boolean }
 public enum InstanceStatus { InProgress, Completed, Cancelled }
 public enum StepStatus { Pending, InProgress, Completed, Failed }
 public enum TokenType { Bearer, ApiKey }

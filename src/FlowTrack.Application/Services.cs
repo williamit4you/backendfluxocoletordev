@@ -158,7 +158,16 @@ public sealed class FlowManagementService(
             throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = ["Esta etapa nao possui integracao de API para teste."] });
         }
 
-        return await integrations.ExecuteAsync(flow, step, request.Data, cancellationToken, triggerType: IntegrationTriggerType.Test);
+        var result = await integrations.ExecuteAsync(flow, step, request.Data, cancellationToken, triggerType: IntegrationTriggerType.Test);
+        return new IntegrationTestResponse(
+            result.Success,
+            result.StatusCode,
+            result.DurationMs,
+            result.Url,
+            result.Method,
+            result.ResponsePreview,
+            result.ErrorMessage,
+            result.MappedData?.ToDictionary(x => x.Key, x => x.Value.ToString()));
     }
 
     private IQueryable<FlowDefinition> LoadFlows()

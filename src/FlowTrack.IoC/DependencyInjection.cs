@@ -91,7 +91,7 @@ internal sealed class IntegrationExecutionService(
     IConfiguration appConfig,
     ILogger<IntegrationExecutionService> logger) : IIntegrationExecutionService
 {
-    public async Task<IntegrationTestResponse> ExecuteAsync(
+    public async Task<IntegrationExecutionResult> ExecuteAsync(
         FlowDefinition flow,
         FlowStep step,
         Dictionary<string, JsonElement> data,
@@ -106,7 +106,7 @@ internal sealed class IntegrationExecutionService(
 
         if (config is null || string.IsNullOrWhiteSpace(config.Url))
         {
-            return await SaveAttemptAsync(step, triggerType, "GET", "", false, null, 0, null, "Etapa sem configuracao de integracao.", instance, stepExecution, cancellationToken);
+            return await SaveAttemptAsync(step, triggerType, "GET", "", false, null, 0, null, "Etapa sem configuracao de integracao.", null, instance, stepExecution, cancellationToken);
         }
 
         var method = ResolveMethod(step.Type, config.Method);
@@ -120,7 +120,7 @@ internal sealed class IntegrationExecutionService(
         if (validationError is not null)
         {
             logger.LogWarning("Destino de integracao bloqueado para a etapa {StepId}: {Error}", step.Id, validationError);
-            return await SaveAttemptAsync(step, triggerType, method, SanitizeUrl(resolvedUrl), false, null, 0, null, validationError, instance, stepExecution, cancellationToken);
+            return await SaveAttemptAsync(step, triggerType, method, SanitizeUrl(resolvedUrl), false, null, 0, null, validationError, null, instance, stepExecution, cancellationToken);
         }
 
         using var request = new HttpRequestMessage(new HttpMethod(method), resolvedUrl);
@@ -128,7 +128,7 @@ internal sealed class IntegrationExecutionService(
 
         if (step.Type == StepType.ApiSend)
         {
-            request.Content = JsonContent.Create(data);
+            request.Content = JsonContent.Create(BuildApiSendPayload(config, data));
         }
 
         var watch = Stopwatch.StartNew();
@@ -141,6 +141,9 @@ internal sealed class IntegrationExecutionService(
             var responseText = await response.Content.ReadAsStringAsync(cancellationToken);
             var preview = Truncate(responseText);
             var success = response.IsSuccessStatusCode;
+            var mappedData = success && step.Type == StepType.ApiQuery
+                ? MapResponseData(config, responseText)
+                : null;
 
             return await SaveAttemptAsync(
                 step,
@@ -152,6 +155,7 @@ internal sealed class IntegrationExecutionService(
                 (int)watch.ElapsedMilliseconds,
                 preview,
                 success ? null : $"Resposta HTTP {(int)response.StatusCode}.",
+                mappedData,
                 instance,
                 stepExecution,
                 cancellationToken);
@@ -169,6 +173,7 @@ internal sealed class IntegrationExecutionService(
                 (int)watch.ElapsedMilliseconds,
                 null,
                 Truncate(ex.Message, 400),
+                null,
                 instance,
                 stepExecution,
                 cancellationToken);
@@ -210,6 +215,78 @@ internal sealed class IntegrationExecutionService(
         }
 
         return value.Length <= max ? value : value[..max];
+    }
+
+    private static Dictionary<string, JsonElement> BuildApiSendPayload(StepApiConfigDto config, Dictionary<string, JsonElement> data)
+    {
+        var selectedKeys = config.SendFieldKeys?
+            .Where(key => !string.IsNullOrWhiteSpace(key))
+            .Select(key => key.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (selectedKeys is null || selectedKeys.Count == 0)
+        {
+            return data;
+        }
+
+        return data
+            .Where(entry => selectedKeys.Contains(entry.Key, StringComparer.OrdinalIgnoreCase))
+            .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static Dictionary<string, JsonElement>? MapResponseData(StepApiConfigDto config, string responseText)
+    {
+        if (config.ResponseMappings is null || config.ResponseMappings.Count == 0 || string.IsNullOrWhiteSpace(responseText))
+        {
+            return null;
+        }
+
+        using var document = JsonDocument.Parse(responseText);
+        var mapped = new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var mapping in config.ResponseMappings)
+        {
+            if (string.IsNullOrWhiteSpace(mapping.FieldKey) || string.IsNullOrWhiteSpace(mapping.ResponsePath))
+            {
+                continue;
+            }
+
+            if (TryResolveJsonPath(document.RootElement, mapping.ResponsePath.Trim(), out var resolved))
+            {
+                mapped[mapping.FieldKey.Trim()] = resolved.Clone();
+            }
+        }
+
+        return mapped.Count == 0 ? null : mapped;
+    }
+
+    private static bool TryResolveJsonPath(JsonElement root, string path, out JsonElement value)
+    {
+        value = root;
+
+        foreach (var segment in path.Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (value.ValueKind == JsonValueKind.Object && value.TryGetProperty(segment, out var property))
+            {
+                value = property;
+                continue;
+            }
+
+            if (value.ValueKind == JsonValueKind.Array
+                && int.TryParse(segment.Trim('[', ']'), out var index)
+                && index >= 0
+                && index < value.GetArrayLength())
+            {
+                value = value[index];
+                continue;
+            }
+
+            value = default;
+            return false;
+        }
+
+        return true;
     }
 
     private void ApplyToken(FlowDefinition flow, StepApiConfigDto config, HttpRequestMessage request)
@@ -326,7 +403,7 @@ internal sealed class IntegrationExecutionService(
         return uri.GetLeftPart(UriPartial.Path);
     }
 
-    private async Task<IntegrationTestResponse> SaveAttemptAsync(
+    private async Task<IntegrationExecutionResult> SaveAttemptAsync(
         FlowStep step,
         IntegrationTriggerType triggerType,
         string method,
@@ -336,6 +413,7 @@ internal sealed class IntegrationExecutionService(
         int durationMs,
         string? preview,
         string? error,
+        Dictionary<string, JsonElement>? mappedData,
         FlowInstance? instance,
         StepExecution? stepExecution,
         CancellationToken cancellationToken)
@@ -358,7 +436,7 @@ internal sealed class IntegrationExecutionService(
         db.IntegrationAttempts.Add(attempt);
         await db.SaveChangesAsync(cancellationToken);
 
-        return new IntegrationTestResponse(success, statusCode, durationMs, attempt.Url, method, attempt.ResponsePreview, attempt.ErrorMessage);
+        return new IntegrationExecutionResult(success, statusCode, durationMs, attempt.Url, method, attempt.ResponsePreview, attempt.ErrorMessage, mappedData);
     }
 }
 
@@ -491,6 +569,16 @@ internal sealed class InstanceAutomationService(
                 item.UpdatedAt = DateTime.UtcNow;
                 await db.SaveChangesAsync(cancellationToken);
                 return;
+            }
+
+            if (stepType == StepType.ApiQuery && result.MappedData is not null)
+            {
+                foreach (var mapped in result.MappedData)
+                {
+                    currentData[mapped.Key] = mapped.Value;
+                }
+
+                item.DataJson = JsonSerializer.Serialize(currentData);
             }
 
             CompleteCurrentStep(item, current, "Etapa de integracao concluida automaticamente.", null);
