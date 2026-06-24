@@ -34,7 +34,18 @@ internal static class FlowDefinitionMapper
                     step.AssignedUserId,
                     step.Fields
                         .OrderBy(x => x.Order)
-                        .Select(mapper.Map<FieldDto>)
+                        .Select(field => new FieldDto(
+                            field.Id,
+                            field.Key,
+                            field.Label,
+                            field.Type,
+                            field.Mask,
+                            field.Required,
+                            field.Order,
+                            field.Options
+                                .OrderBy(option => option.Order)
+                                .Select(option => new FieldOptionDto(option.Id, option.Label, option.Value, option.Order, option.Key, option.Type, option.Mask, option.Required))
+                                .ToList()))
                         .ToList(),
                     ParseApiConfig(step.ConfigurationJson)))
                 .ToList());
@@ -75,14 +86,19 @@ internal static class FlowDefinitionMapper
                         Key = field.Key.Trim(),
                         Label = field.Label.Trim(),
                         Type = field.Type,
+                        Mask = string.IsNullOrWhiteSpace(field.Mask) ? null : field.Mask.Trim(),
                         Required = field.Required,
                         Order = fieldIndex + 1,
                         Options = field.Options
-                            .Where(x => !string.IsNullOrWhiteSpace(x.Label) || !string.IsNullOrWhiteSpace(x.Value))
+                            .Where(x => !string.IsNullOrWhiteSpace(x.Label) || !string.IsNullOrWhiteSpace(x.Value) || !string.IsNullOrWhiteSpace(x.Key) || x.Type.HasValue)
                             .Select((option, optionIndex) => new StepFieldOption
                             {
                                 Label = string.IsNullOrWhiteSpace(option.Label) ? option.Value.Trim() : option.Label.Trim(),
                                 Value = string.IsNullOrWhiteSpace(option.Value) ? option.Label.Trim() : option.Value.Trim(),
+                                Key = string.IsNullOrWhiteSpace(option.Key) ? null : option.Key.Trim(),
+                                Type = option.Type,
+                                Mask = string.IsNullOrWhiteSpace(option.Mask) ? null : option.Mask.Trim(),
+                                Required = option.Required ?? false,
                                 Order = optionIndex + 1
                             })
                             .ToList()

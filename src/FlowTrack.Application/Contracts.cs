@@ -9,7 +9,7 @@ public record LoginResponse(string Token, UserDto User);
 public record UserDto(Guid Id, string Name, string Email, string Role, bool Active);
 public record CreateUserRequest(string Name, string Email, string Password, string Role);
 public record UpdateUserRequest(string Name, string Role, bool Active, string? Password);
-public record FieldOptionDto(Guid? Id, string Label, string Value, int Order);
+public record FieldOptionDto(Guid? Id, string Label, string Value, int Order, string? Key = null, FieldType? Type = null, string? Mask = null, bool? Required = null);
 public record FieldDto(Guid? Id, string Key, string Label, FieldType Type, string? Mask, bool Required, int Order, IReadOnlyList<FieldOptionDto> Options);
 public record FlowTokenDto(Guid? Id, string Name, string? Value, TokenType Type, string? HeaderName, bool Active);
 public record MinioBucketDto(Guid? Id, string Name, string BucketName, string? Description, bool Active, bool IsDefault);

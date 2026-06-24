@@ -476,16 +476,30 @@ namespace FlowTrack.Data.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
+                    b.Property<string>("Key")
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)");
+
                     b.Property<string>("Label")
                         .IsRequired()
                         .HasMaxLength(120)
                         .HasColumnType("character varying(120)");
 
+                    b.Property<string>("Mask")
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)");
+
                     b.Property<int>("Order")
                         .HasColumnType("integer");
 
+                    b.Property<bool>("Required")
+                        .HasColumnType("boolean");
+
                     b.Property<Guid>("StepFieldId")
                         .HasColumnType("uuid");
+
+                    b.Property<int?>("Type")
+                        .HasColumnType("integer");
 
                     b.Property<string>("Value")
                         .IsRequired()

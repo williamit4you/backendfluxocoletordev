@@ -1,6 +1,5 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using AutoMapper;
 using FlowTrack.Domain;
 using Microsoft.EntityFrameworkCore;
 
@@ -8,7 +7,6 @@ namespace FlowTrack.Application;
 
 public sealed class FlowManagementService(
     IAppDbContext db,
-    IMapper mapper,
     ITokenProtectionService tokenProtection,
     IIntegrationExecutionService integrations,
     IAuditService audit) : IFlowManagementService
@@ -205,7 +203,7 @@ public sealed class FlowManagementService(
                     step.Type,
                     step.Order,
                     step.AssignedUserId,
-                    step.Fields.OrderBy(x => x.Order).Select(mapper.Map<FieldDto>).ToList(),
+                    step.Fields.OrderBy(x => x.Order).Select(ToFieldDto).ToList(),
                     ParseApiConfig(step.ConfigurationJson)))
                 .ToList());
     }
@@ -248,15 +246,7 @@ public sealed class FlowManagementService(
                         Mask = string.IsNullOrWhiteSpace(field.Mask) ? null : field.Mask.Trim(),
                         Required = field.Required,
                         Order = fieldIndex + 1,
-                        Options = field.Options
-                            .Where(x => !string.IsNullOrWhiteSpace(x.Label) || !string.IsNullOrWhiteSpace(x.Value))
-                            .Select((option, optionIndex) => new StepFieldOption
-                            {
-                                Label = string.IsNullOrWhiteSpace(option.Label) ? option.Value.Trim() : option.Label.Trim(),
-                                Value = string.IsNullOrWhiteSpace(option.Value) ? option.Label.Trim() : option.Value.Trim(),
-                                Order = optionIndex + 1
-                            })
-                            .ToList()
+                        Options = NormalizeFieldOptions(field).ToList()
                     })
                     .ToList()
             })
@@ -485,6 +475,74 @@ public sealed class FlowManagementService(
         }
     }
 
+    private static FieldDto ToFieldDto(StepField field)
+    {
+        return new FieldDto(
+            field.Id,
+            field.Key,
+            field.Label,
+            field.Type,
+            field.Mask,
+            field.Required,
+            field.Order,
+            field.Options
+                .OrderBy(option => option.Order)
+                .Select(option => new FieldOptionDto(option.Id, option.Label, option.Value, option.Order, option.Key, option.Type, option.Mask, option.Required))
+                .ToList());
+    }
+
+    private static IEnumerable<StepFieldOption> NormalizeFieldOptions(FieldDto field)
+    {
+        return field.Options
+            .Where(option => HasOptionContent(field.Type, option))
+            .Select((option, optionIndex) =>
+            {
+                if (field.Type == FieldType.Select && HasStructuredListField(option))
+                {
+                    var key = option.Key!.Trim();
+                    return new StepFieldOption
+                    {
+                        Label = option.Label.Trim(),
+                        Value = string.IsNullOrWhiteSpace(option.Value) ? key : option.Value.Trim(),
+                        Key = key,
+                        Type = option.Type,
+                        Mask = string.IsNullOrWhiteSpace(option.Mask) ? null : option.Mask.Trim(),
+                        Required = option.Required ?? false,
+                        Order = optionIndex + 1
+                    };
+                }
+
+                var normalizedLabel = string.IsNullOrWhiteSpace(option.Label) ? option.Value.Trim() : option.Label.Trim();
+                var normalizedValue = string.IsNullOrWhiteSpace(option.Value) ? option.Label.Trim() : option.Value.Trim();
+
+                return new StepFieldOption
+                {
+                    Label = normalizedLabel,
+                    Value = normalizedValue,
+                    Key = string.IsNullOrWhiteSpace(option.Key) ? null : option.Key.Trim(),
+                    Type = option.Type,
+                    Mask = string.IsNullOrWhiteSpace(option.Mask) ? null : option.Mask.Trim(),
+                    Required = option.Required ?? false,
+                    Order = optionIndex + 1
+                };
+            });
+    }
+
+    private static bool HasOptionContent(FieldType fieldType, FieldOptionDto option)
+    {
+        return fieldType == FieldType.Select && HasStructuredListField(option)
+            || !string.IsNullOrWhiteSpace(option.Label)
+            || !string.IsNullOrWhiteSpace(option.Value);
+    }
+
+    private static bool HasStructuredListField(FieldOptionDto option)
+    {
+        return !string.IsNullOrWhiteSpace(option.Key)
+            || option.Type.HasValue
+            || !string.IsNullOrWhiteSpace(option.Mask)
+            || option.Required == true;
+    }
+
     private static void ValidateDraftForPublish(FlowDefinition draft)
     {
         if (!draft.Steps.Any())
@@ -702,23 +760,6 @@ public sealed class InstanceManagementService(
 
         var orderedSteps = flow.Steps.OrderBy(x => x.Order).ToList();
         var firstStep = orderedSteps.FirstOrDefault();
-
-        if (firstStep is not null)
-        {
-            var missing = firstStep.Fields
-                .Where(x => x.Required)
-                .Where(x => x.Type != FieldType.Document && x.Type != FieldType.Attachment && x.Type != FieldType.Photo)
-                .Where(x => !request.Data.TryGetValue(x.Key, out var value)
-                    || value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined
-                    || string.IsNullOrWhiteSpace(value.ToString()))
-                .Select(x => x.Label)
-                .ToArray();
-
-            if (missing.Length > 0)
-            {
-                throw new AppValidationException(new Dictionary<string, string[]> { ["required"] = missing });
-            }
-        }
 
         var now = DateTime.UtcNow;
         var instance = new FlowInstance
@@ -1125,7 +1166,7 @@ public sealed class InstanceManagementService(
                                 f.Mask,
                                 f.Required,
                                 f.Order,
-                                f.Options.OrderBy(o => o.Order).Select(o => new FieldOptionDto(o.Id, o.Label, o.Value, o.Order)).ToList(),
+                                f.Options.OrderBy(o => o.Order).Select(o => new FieldOptionDto(o.Id, o.Label, o.Value, o.Order, o.Key, o.Type, o.Mask, o.Required)).ToList(),
                                 f.Type is FieldType.Attachment or FieldType.Photo or FieldType.Document
                                     ? string.Join(", ", (storedFileDtos.TryGetValue(x.Id, out var uploadFiles) ? uploadFiles.Where(file => string.Equals(file.FieldKey, f.Key, StringComparison.OrdinalIgnoreCase)).Select(file => file.FileName) : Enumerable.Empty<string>()).ToArray())
                                     : rawData.TryGetValue(f.Key, out var fieldValue) ? fieldValue.ToString() : null))

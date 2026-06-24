@@ -62,6 +62,10 @@ public sealed class StepFieldOption : Entity
     public Guid StepFieldId { get; set; }
     public string Label { get; set; } = "";
     public string Value { get; set; } = "";
+    public string? Key { get; set; }
+    public FieldType? Type { get; set; }
+    public string? Mask { get; set; }
+    public bool Required { get; set; }
     public int Order { get; set; }
 }
 
