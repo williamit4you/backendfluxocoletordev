@@ -499,7 +499,21 @@ public sealed class FlowManagementService(
             {
                 if (field.Type == FieldType.Select && HasStructuredListField(option))
                 {
-                    var key = option.Key!.Trim();
+                    var key = string.IsNullOrWhiteSpace(option.Key) ? null : option.Key.Trim();
+                    if (string.IsNullOrWhiteSpace(key) || !option.Type.HasValue || string.IsNullOrWhiteSpace(option.Label))
+                    {
+                        return new StepFieldOption
+                        {
+                            Label = string.IsNullOrWhiteSpace(option.Label) ? string.Empty : option.Label.Trim(),
+                            Value = string.IsNullOrWhiteSpace(option.Value) ? string.Empty : option.Value.Trim(),
+                            Key = key,
+                            Type = option.Type,
+                            Mask = string.IsNullOrWhiteSpace(option.Mask) ? null : option.Mask.Trim(),
+                            Required = option.Required ?? false,
+                            Order = optionIndex + 1
+                        };
+                    }
+
                     return new StepFieldOption
                     {
                         Label = option.Label.Trim(),
@@ -537,7 +551,8 @@ public sealed class FlowManagementService(
 
     private static bool HasStructuredListField(FieldOptionDto option)
     {
-        return !string.IsNullOrWhiteSpace(option.Key)
+        return !string.IsNullOrWhiteSpace(option.Label)
+            || !string.IsNullOrWhiteSpace(option.Key)
             || option.Type.HasValue
             || !string.IsNullOrWhiteSpace(option.Mask)
             || option.Required == true;
