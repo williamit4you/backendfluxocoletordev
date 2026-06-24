@@ -19,7 +19,7 @@ public record ResponseFieldMappingDto(string FieldKey, string ResponsePath);
 public record BodyFieldMappingDto(string TargetKey, string SourceReference);
 public record StepScheduleAssistDto(int? IntervalMinutes = null, string? CronExpression = null, string? HelperText = null);
 public record StepApiConfigDto(string? Url, string? Method, string? TokenName, string? ScheduleMode, string? ScheduleValue, string? QueryTemplate, bool ValidateTls, IReadOnlyList<string>? SendFieldKeys = null, IReadOnlyList<ResponseFieldMappingDto>? ResponseMappings = null, IReadOnlyList<BodyFieldMappingDto>? BodyMappings = null, StepScheduleAssistDto? ScheduleAssist = null);
-public record StepDto(Guid? Id, string Name, string? Description, StepType Type, int Order, Guid? AssignedUserId, IReadOnlyList<FieldDto> Fields, StepApiConfigDto? ApiConfig);
+public record StepDto(Guid? Id, string Name, string? Description, StepType Type, int Order, IReadOnlyList<Guid> AssignedUserIds, IReadOnlyList<FieldDto> Fields, StepApiConfigDto? ApiConfig);
 public record FlowDto(Guid Id, Guid FlowKey, string Name, string Description, bool Active, int VersionNumber, string LifecycleStatus, DateTime? PublishedAt, bool HasDraft, IReadOnlyList<FlowTokenDto> Tokens, IReadOnlyList<Guid> AssignedUserIds, IReadOnlyList<StepDto> Steps);
 public record SaveFlowRequest(string Name, string Description, bool Active, IReadOnlyList<FlowTokenDto> Tokens, IReadOnlyList<Guid> AssignedUserIds, IReadOnlyList<StepDto> Steps);
 public record IntegrationAttemptDto(Guid Id, string TriggerType, string Method, string Url, int? ResponseStatusCode, bool Success, int DurationMs, DateTime CreatedAt, string? ResponsePreview, string? ErrorMessage);
@@ -41,6 +41,7 @@ public interface IAppDbContext
     IQueryable<FlowInstance> Instances { get; }
     IQueryable<FlowToken> Tokens { get; }
     IQueryable<FlowDefinitionUser> FlowAssignments { get; }
+    IQueryable<FlowStepUser> StepAssignments { get; }
     IQueryable<FlowStep> Steps { get; }
     IQueryable<StepField> Fields { get; }
     IQueryable<StepFieldOption> FieldOptions { get; }

@@ -84,6 +84,7 @@ public sealed class FlowManagementService(
 
         db.RemoveRange(flow.Steps.SelectMany(x => x.Fields).SelectMany(x => x.Options));
         db.RemoveRange(flow.Steps.SelectMany(x => x.Fields));
+        db.RemoveRange(flow.Steps.SelectMany(x => x.AssignedUsers));
         db.RemoveRange(flow.Steps);
         db.RemoveRange(flow.Tokens);
         db.RemoveRange(flow.AssignedUsers);
@@ -176,6 +177,8 @@ public sealed class FlowManagementService(
             .Include(x => x.Tokens)
             .Include(x => x.AssignedUsers)
             .Include(x => x.Steps)
+                .ThenInclude(x => x.AssignedUsers)
+            .Include(x => x.Steps)
                 .ThenInclude(x => x.Fields)
                     .ThenInclude(x => x.Options);
     }
@@ -208,7 +211,7 @@ public sealed class FlowManagementService(
                     step.Description,
                     step.Type,
                     step.Order,
-                    step.AssignedUserId,
+                    step.AssignedUsers.OrderBy(x => x.UserId).Select(x => x.UserId).ToList(),
                     step.Fields.OrderBy(x => x.Order).Select(ToFieldDto).ToList(),
                     ParseApiConfig(step.ConfigurationJson)))
                 .ToList());
@@ -248,7 +251,14 @@ public sealed class FlowManagementService(
                 Description = string.IsNullOrWhiteSpace(step.Description) ? null : step.Description.Trim(),
                 Type = step.Type,
                 Order = stepIndex + 1,
-                AssignedUserId = step.AssignedUserId,
+                AssignedUserId = step.AssignedUserIds.FirstOrDefault(),
+                AssignedUsers = step.AssignedUserIds
+                    .Distinct()
+                    .Select(userId => new FlowStepUser
+                    {
+                        UserId = userId
+                    })
+                    .ToList(),
                 ConfigurationJson = step.ApiConfig is null ? null : JsonSerializer.Serialize(NormalizeApiConfig(step.ApiConfig)),
                 Fields = step.Fields
                     .Where(x => !string.IsNullOrWhiteSpace(x.Label) && !string.IsNullOrWhiteSpace(x.Key))
@@ -417,7 +427,13 @@ public sealed class FlowManagementService(
                     Description = step.Description,
                     Type = step.Type,
                     Order = step.Order,
-                    AssignedUserId = step.AssignedUserId,
+                    AssignedUserId = step.AssignedUsers.Select(x => (Guid?)x.UserId).FirstOrDefault() ?? step.AssignedUserId,
+                    AssignedUsers = step.AssignedUsers
+                        .Select(user => new FlowStepUser
+                        {
+                            UserId = user.UserId
+                        })
+                        .ToList(),
                     ConfigurationJson = step.ConfigurationJson,
                     Fields = step.Fields
                         .OrderBy(x => x.Order)
@@ -749,8 +765,14 @@ public sealed class InstanceManagementService(
                 .ThenInclude(x => x.AssignedUsers)
             .Include(x => x.FlowDefinition)
                 .ThenInclude(x => x.Steps)
+                    .ThenInclude(x => x.AssignedUsers)
+            .Include(x => x.FlowDefinition)
+                .ThenInclude(x => x.Steps)
                     .ThenInclude(x => x.Fields)
                         .ThenInclude(x => x.Options)
+            .Include(x => x.StepExecutions)
+                .ThenInclude(x => x.FlowStep)
+                    .ThenInclude(x => x.AssignedUsers)
             .Include(x => x.StepExecutions)
                 .ThenInclude(x => x.FlowStep)
             .Include(x => x.IntegrationAttempts)
@@ -1029,9 +1051,15 @@ public sealed class InstanceManagementService(
                 .ThenInclude(x => x.Tokens)
             .Include(x => x.FlowDefinition)
                 .ThenInclude(x => x.Steps)
+                    .ThenInclude(x => x.AssignedUsers)
+            .Include(x => x.FlowDefinition)
+                .ThenInclude(x => x.Steps)
                     .ThenInclude(x => x.Fields)
                         .ThenInclude(x => x.Options)
             .Include(x => x.IntegrationAttempts)
+            .Include(x => x.StepExecutions)
+                .ThenInclude(x => x.FlowStep)
+                    .ThenInclude(x => x.AssignedUsers)
             .Include(x => x.StepExecutions)
                 .ThenInclude(x => x.FlowStep)
                     .ThenInclude(x => x.Fields)
@@ -1055,8 +1083,15 @@ public sealed class InstanceManagementService(
 
     private static bool CanActOnStep(FlowDefinition flow, FlowStep step, Guid? actorUserId)
     {
-        var assignedToStep = actorUserId.HasValue && step.AssignedUserId == actorUserId.Value;
-        return assignedToStep || HasFlowAccess(flow, actorUserId) || (flow.AssignedUsers.Count == 0 && !step.AssignedUserId.HasValue);
+        var hasStepAssignments = step.AssignedUsers.Count > 0;
+        var assignedToStep = actorUserId.HasValue && step.AssignedUsers.Any(user => user.UserId == actorUserId.Value);
+
+        if (hasStepAssignments)
+        {
+            return assignedToStep || HasFlowAccess(flow, actorUserId);
+        }
+
+        return HasFlowAccess(flow, actorUserId) || (flow.AssignedUsers.Count == 0 && !step.AssignedUserId.HasValue);
     }
 
     private static bool CanViewInstance(FlowInstance item, Guid? actorUserId)
@@ -1066,7 +1101,7 @@ public sealed class InstanceManagementService(
             return true;
         }
 
-        return actorUserId.HasValue && item.StepExecutions.Any(step => step.FlowStep.AssignedUserId == actorUserId.Value);
+        return actorUserId.HasValue && item.StepExecutions.Any(step => step.FlowStep.AssignedUsers.Any(user => user.UserId == actorUserId.Value));
     }
 
     private static Dictionary<string, JsonElement> MergeStepData(FlowInstance item, StepExecution current, Dictionary<string, JsonElement>? newData)

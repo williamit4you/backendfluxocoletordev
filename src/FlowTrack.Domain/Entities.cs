@@ -84,8 +84,15 @@ public sealed class FlowStep : Entity
     public StepType Type { get; set; }
     public int Order { get; set; }
     public Guid? AssignedUserId { get; set; }
+    public List<FlowStepUser> AssignedUsers { get; set; } = [];
     public string? ConfigurationJson { get; set; }
     public List<StepField> Fields { get; set; } = [];
+}
+
+public sealed class FlowStepUser : Entity
+{
+    public Guid FlowStepId { get; set; }
+    public Guid UserId { get; set; }
 }
 
 public sealed class FlowInstance : Entity
