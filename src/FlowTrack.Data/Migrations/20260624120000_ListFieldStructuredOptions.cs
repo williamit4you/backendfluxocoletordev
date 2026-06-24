@@ -1,9 +1,13 @@
 using Microsoft.EntityFrameworkCore.Migrations;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using FlowTrack.Data;
 
 #nullable disable
 
 namespace FlowTrack.Data.Migrations
 {
+    [DbContext(typeof(AppDbContext))]
+    [Migration("20260624120000_ListFieldStructuredOptions")]
     public partial class ListFieldStructuredOptions : Migration
     {
         protected override void Up(MigrationBuilder migrationBuilder)

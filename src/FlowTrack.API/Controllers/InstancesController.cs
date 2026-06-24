@@ -10,6 +10,12 @@ namespace FlowTrack.API.Controllers;
 [Route("api/instances")]
 public sealed class InstancesController(IInstanceManagementService instances) : ControllerBase
 {
+    public sealed class UploadStepFileForm
+    {
+        public string FieldKey { get; set; } = string.Empty;
+        public IFormFile File { get; set; } = default!;
+    }
+
     [HttpGet]
     public async Task<ActionResult<IReadOnlyList<InstanceDto>>> GetAll([FromQuery] Guid? flowId, [FromQuery] string? status, [FromQuery] string? search)
     {
@@ -88,12 +94,12 @@ public sealed class InstancesController(IInstanceManagementService instances) : 
 
     [HttpPost("{id:guid}/upload")]
     [RequestSizeLimit(10_000_000)]
-    public async Task<ActionResult<InstanceDto>> Upload(Guid id, [FromForm] string fieldKey, [FromForm] IFormFile file)
+    public async Task<ActionResult<InstanceDto>> Upload(Guid id, [FromForm] UploadStepFileForm request)
     {
         try
         {
-            await using var stream = file.OpenReadStream();
-            return Ok(await instances.UploadCurrentStepFileAsync(id, fieldKey, file.FileName, file.ContentType, stream, TryGetCurrentUserId(), HttpContext.RequestAborted));
+            await using var stream = request.File.OpenReadStream();
+            return Ok(await instances.UploadCurrentStepFileAsync(id, request.FieldKey, request.File.FileName, request.File.ContentType, stream, TryGetCurrentUserId(), HttpContext.RequestAborted));
         }
         catch (AppValidationException ex)
         {
