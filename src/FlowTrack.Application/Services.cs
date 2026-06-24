@@ -962,11 +962,18 @@ public sealed class InstanceManagementService(
             .Where(x => x.Required)
             .Where(x => IsMissingRequiredValue(x, data))
             .Select(x => x.Label)
-            .ToArray();
+            .ToList();
 
-        if (missing.Length > 0)
+        var invalidStructuredRows = current.FlowStep.Fields
+            .SelectMany(field => ValidateStructuredListRows(field, data))
+            .ToList();
+
+        if (missing.Count > 0 || invalidStructuredRows.Count > 0)
         {
-            throw new AppValidationException(new Dictionary<string, string[]> { ["required"] = missing });
+            throw new AppValidationException(new Dictionary<string, string[]>
+            {
+                ["required"] = [.. missing, .. invalidStructuredRows]
+            });
         }
     }
 
@@ -993,7 +1000,62 @@ public sealed class InstanceManagementService(
             return value.ValueKind != JsonValueKind.Array || value.GetArrayLength() == 0;
         }
 
+        if (field.Type == FieldType.Select && field.Options.Any(option => !string.IsNullOrWhiteSpace(option.Key) && option.Type.HasValue))
+        {
+            return value.ValueKind != JsonValueKind.Array || !value.EnumerateArray().Any(row => row.ValueKind == JsonValueKind.Object && row.EnumerateObject().Any(property => !string.IsNullOrWhiteSpace(property.Value.ToString())));
+        }
+
         return string.IsNullOrWhiteSpace(value.ToString());
+    }
+
+    private static IEnumerable<string> ValidateStructuredListRows(StepField field, Dictionary<string, JsonElement> data)
+    {
+        if (field.Type != FieldType.Select || !field.Options.Any(option => !string.IsNullOrWhiteSpace(option.Key) && option.Type.HasValue))
+        {
+            return [];
+        }
+
+        if (!data.TryGetValue(field.Key, out var value) || value.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var errors = new List<string>();
+        var requiredColumns = field.Options
+            .Where(option => option.Required && !string.IsNullOrWhiteSpace(option.Key))
+            .Select(option => new { option.Label, Key = option.Key!.Trim() })
+            .ToList();
+
+        if (requiredColumns.Count == 0)
+        {
+            return errors;
+        }
+
+        var rowIndex = 0;
+        foreach (var row in value.EnumerateArray())
+        {
+            rowIndex++;
+            if (row.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            var hasAnyContent = row.EnumerateObject().Any(property => !string.IsNullOrWhiteSpace(property.Value.ToString()));
+            if (!hasAnyContent)
+            {
+                continue;
+            }
+
+            foreach (var column in requiredColumns)
+            {
+                if (!row.TryGetProperty(column.Key, out var cell) || string.IsNullOrWhiteSpace(cell.ToString()))
+                {
+                    errors.Add($"{field.Label}: item {rowIndex} precisa preencher '{column.Label}'.");
+                }
+            }
+        }
+
+        return errors;
     }
 
     private static List<UploadedFileDto> ReadUploadedFiles(Dictionary<string, JsonElement> data, string fieldKey)

@@ -48,6 +48,7 @@ public static class DependencyInjection
         services.AddScoped<IInstanceAutomationService, InstanceAutomationService>();
         services.AddSingleton<IWorkerMonitor, WorkerMonitor>();
         services.AddHostedService<ApiQueryWorker>();
+        services.AddHostedService<AutomaticStartWorker>();
         services.AddHttpClient<IIntegrationExecutionService, IntegrationExecutionService>(client =>
         {
             client.Timeout = TimeSpan.FromSeconds(30);
@@ -779,35 +780,127 @@ internal sealed class ApiQueryWorker(
 
     private static bool IsDue(StepApiConfigDto config, AppDbContext db, Guid instanceId, Guid stepId)
     {
-        if (string.Equals(config.ScheduleMode, "manual", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
         var lastAttempt = db.IntegrationAttempts
             .AsNoTracking()
             .Where(x => x.FlowInstanceId == instanceId && x.FlowStepId == stepId && x.TriggerType == IntegrationTriggerType.Runtime)
             .OrderByDescending(x => x.CreatedAt)
             .FirstOrDefault();
+        var reference = lastAttempt?.CreatedAt ?? DateTime.UtcNow.AddMinutes(-1);
+        return ScheduleRuntimeHelper.IsDue(config, lastAttempt?.CreatedAt, reference, DateTime.UtcNow, allowImmediateFirstIntervalRun: true);
+    }
+}
 
-        if (lastAttempt is null)
+internal sealed class AutomaticStartWorker(
+    IServiceScopeFactory scopeFactory,
+    ILogger<AutomaticStartWorker> logger) : BackgroundService
+{
+    private static readonly SemaphoreSlim Gate = new(1, 1);
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
         {
-            return true;
+            await Gate.WaitAsync(stoppingToken);
+            try
+            {
+                await ProcessDueStartsAsync(stoppingToken);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Falha no worker de inicio automatico de fluxos.");
+            }
+            finally
+            {
+                Gate.Release();
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
+        }
+    }
+
+    private async Task ProcessDueStartsAsync(CancellationToken stoppingToken)
+    {
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var instances = scope.ServiceProvider.GetRequiredService<IInstanceManagementService>();
+
+        var flows = await db.FlowDefinitions
+            .AsNoTracking()
+            .Include(x => x.Steps)
+            .Where(x => x.Active && x.LifecycleStatus == FlowLifecycleStatus.Published)
+            .ToListAsync(stoppingToken);
+
+        var now = DateTime.UtcNow;
+        foreach (var flow in flows)
+        {
+            var firstStep = flow.Steps.OrderBy(step => step.Order).FirstOrDefault();
+            if (firstStep is null || firstStep.Type != StepType.Automatic || string.IsNullOrWhiteSpace(firstStep.ConfigurationJson))
+            {
+                continue;
+            }
+
+            var config = JsonSerializer.Deserialize<StepApiConfigDto>(firstStep.ConfigurationJson);
+            if (config is null)
+            {
+                continue;
+            }
+
+            var lastCreatedAt = await db.FlowInstances
+                .AsNoTracking()
+                .Where(instance => instance.FlowDefinitionId == flow.Id)
+                .OrderByDescending(instance => instance.CreatedAt)
+                .Select(instance => (DateTime?)instance.CreatedAt)
+                .FirstOrDefaultAsync(stoppingToken);
+
+            var reference = flow.PublishedAt ?? flow.CreatedAt;
+            if (!ScheduleRuntimeHelper.IsDue(config, lastCreatedAt, reference, now))
+            {
+                continue;
+            }
+
+            await instances.CreateAsync(new CreateInstanceRequest(flow.Id, null, []), stoppingToken);
+            logger.LogInformation("Fluxo {FlowId} iniciado automaticamente pelo agendamento da etapa inicial.", flow.Id);
+        }
+    }
+}
+
+internal static class ScheduleRuntimeHelper
+{
+    public static bool IsDue(
+        StepApiConfigDto config,
+        DateTime? lastRunAtUtc,
+        DateTime referenceUtc,
+        DateTime nowUtc,
+        bool allowImmediateFirstIntervalRun = false)
+    {
+        if (string.Equals(config.ScheduleMode, "manual", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
         }
 
         if (string.Equals(config.ScheduleMode, "interval", StringComparison.OrdinalIgnoreCase))
         {
             var minutes = ParseIntervalMinutes(config.ScheduleValue);
-            return minutes > 0 && lastAttempt.CreatedAt <= DateTime.UtcNow.AddMinutes(-minutes);
+            if (minutes <= 0)
+            {
+                return false;
+            }
+
+            if (lastRunAtUtc.HasValue)
+            {
+                return lastRunAtUtc.Value <= nowUtc.AddMinutes(-minutes);
+            }
+
+            return allowImmediateFirstIntervalRun || referenceUtc.AddMinutes(minutes) <= nowUtc;
         }
 
-        if (string.Equals(config.ScheduleMode, "cron", StringComparison.OrdinalIgnoreCase))
+        if (!string.Equals(config.ScheduleMode, "cron", StringComparison.OrdinalIgnoreCase))
         {
-            var minutes = ParseCronMinutes(config.ScheduleValue);
-            return minutes > 0 && lastAttempt.CreatedAt <= DateTime.UtcNow.AddMinutes(-minutes);
+            return false;
         }
 
-        return false;
+        var windowStart = lastRunAtUtc ?? referenceUtc;
+        return HasCronOccurrenceBetween(config.ScheduleValue, windowStart, nowUtc);
     }
 
     private static int ParseIntervalMinutes(string? value)
@@ -821,20 +914,114 @@ internal sealed class ApiQueryWorker(
         return int.TryParse(digits, out var minutes) ? Math.Max(minutes, 1) : 0;
     }
 
-    private static int ParseCronMinutes(string? value)
+    private static bool HasCronOccurrenceBetween(string? value, DateTime startExclusiveUtc, DateTime endInclusiveUtc)
     {
         if (string.IsNullOrWhiteSpace(value))
         {
-            return 0;
+            return false;
         }
 
         var parts = value.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        if (parts.Length > 0 && parts[0].StartsWith("*/", StringComparison.Ordinal))
+        if (parts.Length != 5)
         {
-            return int.TryParse(parts[0][2..], out var everyMinutes) ? Math.Max(everyMinutes, 1) : 0;
+            return false;
         }
 
-        return 1;
+        var probe = new DateTime(startExclusiveUtc.Year, startExclusiveUtc.Month, startExclusiveUtc.Day, startExclusiveUtc.Hour, startExclusiveUtc.Minute, 0, DateTimeKind.Utc).AddMinutes(1);
+        var limit = new DateTime(endInclusiveUtc.Year, endInclusiveUtc.Month, endInclusiveUtc.Day, endInclusiveUtc.Hour, endInclusiveUtc.Minute, 0, DateTimeKind.Utc);
+        var minimumProbe = limit.AddDays(-32);
+        if (probe < minimumProbe)
+        {
+            probe = minimumProbe;
+        }
+
+        while (probe <= limit)
+        {
+            if (MatchesCron(parts, probe))
+            {
+                return true;
+            }
+
+            probe = probe.AddMinutes(1);
+        }
+
+        return false;
+    }
+
+    private static bool MatchesCron(IReadOnlyList<string> parts, DateTime instantUtc)
+    {
+        return MatchesCronPart(parts[0], instantUtc.Minute, 0, 59)
+            && MatchesCronPart(parts[1], instantUtc.Hour, 0, 23)
+            && MatchesCronPart(parts[2], instantUtc.Day, 1, 31)
+            && MatchesCronPart(parts[3], instantUtc.Month, 1, 12)
+            && MatchesCronPart(parts[4], NormalizeDayOfWeek(instantUtc.DayOfWeek), 0, 7);
+    }
+
+    private static int NormalizeDayOfWeek(DayOfWeek dayOfWeek)
+    {
+        return dayOfWeek == DayOfWeek.Sunday ? 0 : (int)dayOfWeek;
+    }
+
+    private static bool MatchesCronPart(string expression, int value, int min, int max)
+    {
+        foreach (var token in expression.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (MatchesCronToken(token, value, min, max))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool MatchesCronToken(string token, int value, int min, int max)
+    {
+        if (token == "*")
+        {
+            return true;
+        }
+
+        var step = 1;
+        var rangeExpression = token;
+        if (token.Contains('/'))
+        {
+            var split = token.Split('/', 2, StringSplitOptions.TrimEntries);
+            rangeExpression = split[0];
+            if (!int.TryParse(split[1], out step) || step <= 0)
+            {
+                return false;
+            }
+        }
+
+        var start = min;
+        var end = max;
+        if (rangeExpression != "*" && !string.IsNullOrWhiteSpace(rangeExpression))
+        {
+            if (rangeExpression.Contains('-'))
+            {
+                var bounds = rangeExpression.Split('-', 2, StringSplitOptions.TrimEntries);
+                if (!int.TryParse(bounds[0], out start) || !int.TryParse(bounds[1], out end))
+                {
+                    return false;
+                }
+            }
+            else if (!int.TryParse(rangeExpression, out start))
+            {
+                return false;
+            }
+            else
+            {
+                end = start;
+            }
+        }
+
+        if (value < start || value > end)
+        {
+            return false;
+        }
+
+        return (value - start) % step == 0;
     }
 }
 
