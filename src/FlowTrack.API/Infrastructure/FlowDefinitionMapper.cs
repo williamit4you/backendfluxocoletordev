@@ -23,6 +23,10 @@ internal static class FlowDefinitionMapper
                 .OrderBy(x => x.Name)
                 .Select(x => new FlowTokenDto(x.Id, x.Name, includeTokenValues && !string.IsNullOrWhiteSpace(x.Value) ? tokenProtection.Unprotect(x.Value) : null, x.Type, x.HeaderName, x.Active))
                 .ToList(),
+            flow.AssignedUsers
+                .OrderBy(x => x.UserId)
+                .Select(x => x.UserId)
+                .ToList(),
             flow.Steps
                 .OrderBy(x => x.Order)
                 .Select(step => new StepDto(
@@ -66,6 +70,14 @@ internal static class FlowDefinitionMapper
                 Type = x.Type,
                 HeaderName = string.IsNullOrWhiteSpace(x.HeaderName) ? null : x.HeaderName.Trim(),
                 Active = x.Active
+            })
+            .ToList();
+
+        flow.AssignedUsers = request.AssignedUserIds
+            .Distinct()
+            .Select(userId => new FlowDefinitionUser
+            {
+                UserId = userId
             })
             .ToList();
 

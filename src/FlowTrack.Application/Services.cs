@@ -86,6 +86,7 @@ public sealed class FlowManagementService(
         db.RemoveRange(flow.Steps.SelectMany(x => x.Fields));
         db.RemoveRange(flow.Steps);
         db.RemoveRange(flow.Tokens);
+        db.RemoveRange(flow.AssignedUsers);
 
         Apply(flow, request);
         await db.SaveChangesAsync(cancellationToken);
@@ -173,6 +174,7 @@ public sealed class FlowManagementService(
     {
         return db.Flows
             .Include(x => x.Tokens)
+            .Include(x => x.AssignedUsers)
             .Include(x => x.Steps)
                 .ThenInclude(x => x.Fields)
                     .ThenInclude(x => x.Options);
@@ -193,6 +195,10 @@ public sealed class FlowManagementService(
             flow.Tokens
                 .OrderBy(x => x.Name)
                 .Select(x => new FlowTokenDto(x.Id, x.Name, includeTokenValues && !string.IsNullOrWhiteSpace(x.Value) ? tokenProtection.Unprotect(x.Value) : null, x.Type, x.HeaderName, x.Active))
+                .ToList(),
+            flow.AssignedUsers
+                .OrderBy(x => x.UserId)
+                .Select(x => x.UserId)
                 .ToList(),
             flow.Steps
                 .OrderBy(x => x.Order)
@@ -223,6 +229,14 @@ public sealed class FlowManagementService(
                 Type = x.Type,
                 HeaderName = string.IsNullOrWhiteSpace(x.HeaderName) ? null : x.HeaderName.Trim(),
                 Active = x.Active
+            })
+            .ToList();
+
+        flow.AssignedUsers = request.AssignedUserIds
+            .Distinct()
+            .Select(userId => new FlowDefinitionUser
+            {
+                UserId = userId
             })
             .ToList();
 
@@ -389,6 +403,12 @@ public sealed class FlowManagementService(
                 HeaderName = token.HeaderName,
                 Active = token.Active
             }).ToList(),
+            AssignedUsers = source.AssignedUsers
+                .Select(user => new FlowDefinitionUser
+                {
+                    UserId = user.UserId
+                })
+                .ToList(),
             Steps = source.Steps
                 .OrderBy(x => x.Order)
                 .Select(step => new FlowStep
@@ -415,6 +435,10 @@ public sealed class FlowManagementService(
                                 {
                                     Label = option.Label,
                                     Value = option.Value,
+                                    Key = option.Key,
+                                    Type = option.Type,
+                                    Mask = option.Mask,
+                                    Required = option.Required,
                                     Order = option.Order
                                 })
                                 .ToList()
@@ -717,10 +741,12 @@ public sealed class InstanceManagementService(
     IInstanceAutomationService automation,
     IFileStorageService fileStorage) : IInstanceManagementService
 {
-    public async Task<IReadOnlyList<InstanceDto>> GetAllAsync(Guid? flowId, string? status, string? search, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<InstanceDto>> GetAllAsync(Guid? flowId, string? status, string? search, Guid? actorUserId, CancellationToken cancellationToken)
     {
         var query = db.Instances
             .AsNoTracking()
+            .Include(x => x.FlowDefinition)
+                .ThenInclude(x => x.AssignedUsers)
             .Include(x => x.FlowDefinition)
                 .ThenInclude(x => x.Steps)
                     .ThenInclude(x => x.Fields)
@@ -747,6 +773,7 @@ public sealed class InstanceManagementService(
         }
 
         var rows = await query.OrderByDescending(x => x.UpdatedAt).Take(200).ToListAsync(cancellationToken);
+        rows = rows.Where(row => CanViewInstance(row, actorUserId)).ToList();
         var result = new List<InstanceDto>(rows.Count);
         foreach (var row in rows)
         {
@@ -756,22 +783,61 @@ public sealed class InstanceManagementService(
         return result;
     }
 
-    public async Task<InstanceDto> GetByIdAsync(Guid id, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<InstanceDto>> GetPendingTasksAsync(Guid? actorUserId, CancellationToken cancellationToken)
+    {
+        var rows = await LoadInstance()
+            .AsNoTracking()
+            .Where(x => x.Status == InstanceStatus.InProgress)
+            .OrderByDescending(x => x.UpdatedAt)
+            .Take(200)
+            .ToListAsync(cancellationToken);
+
+        var visibleRows = rows
+            .Where(row =>
+            {
+                var current = row.StepExecutions.SingleOrDefault(step => step.Status == StepStatus.InProgress);
+                return current is not null
+                    && !IsAutomaticStep(current.FlowStep.Type)
+                    && CanActOnStep(row.FlowDefinition, current.FlowStep, actorUserId);
+            })
+            .ToList();
+
+        var result = new List<InstanceDto>(visibleRows.Count);
+        foreach (var row in visibleRows)
+        {
+            result.Add(await ToDtoAsync(row, cancellationToken));
+        }
+
+        return result;
+    }
+
+    public async Task<InstanceDto> GetByIdAsync(Guid id, Guid? actorUserId, CancellationToken cancellationToken)
     {
         var item = await LoadInstance().AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
             ?? throw new AppNotFoundException("Execucao nao encontrada.");
 
+        if (!CanViewInstance(item, actorUserId))
+        {
+            throw new AppForbiddenException();
+        }
+
         return await ToDtoAsync(item, cancellationToken);
     }
 
-    public async Task<Guid> CreateAsync(CreateInstanceRequest request, CancellationToken cancellationToken)
+    public async Task<Guid> CreateAsync(CreateInstanceRequest request, Guid? actorUserId, CancellationToken cancellationToken)
     {
         var flow = await db.Flows
             .Include(x => x.Tokens)
+            .Include(x => x.AssignedUsers)
             .Include(x => x.Steps)
                 .ThenInclude(x => x.Fields)
             .SingleOrDefaultAsync(x => x.Id == request.FlowDefinitionId && x.Active && x.LifecycleStatus == FlowLifecycleStatus.Published, cancellationToken)
             ?? throw new AppNotFoundException("Fluxo publicado nao encontrado.");
+
+        if (!HasFlowAccess(flow, actorUserId))
+        {
+            throw new AppForbiddenException();
+        }
 
         var orderedSteps = flow.Steps.OrderBy(x => x.Order).ToList();
         var firstStep = orderedSteps.FirstOrDefault();
@@ -820,6 +886,11 @@ public sealed class InstanceManagementService(
             throw new AppConflictException("Nenhuma etapa ativa encontrada.");
         }
 
+        if (!CanActOnStep(item.FlowDefinition, current.FlowStep, actorUserId))
+        {
+            throw new AppForbiddenException();
+        }
+
         if (current.FlowStep.Type == StepType.ApiSend || current.FlowStep.Type == StepType.ApiQuery || current.FlowStep.Type == StepType.Automatic)
         {
             throw new AppConflictException("A etapa atual eh automatica e nao aceita preenchimento manual.");
@@ -853,6 +924,11 @@ public sealed class InstanceManagementService(
         if (current is null)
         {
             throw new AppConflictException("Nenhuma etapa ativa encontrada.");
+        }
+
+        if (!CanActOnStep(item.FlowDefinition, current.FlowStep, actorUserId))
+        {
+            throw new AppForbiddenException();
         }
 
         if (current.FlowStep.Type == StepType.ApiSend || current.FlowStep.Type == StepType.ApiQuery || current.FlowStep.Type == StepType.Automatic)
@@ -909,6 +985,11 @@ public sealed class InstanceManagementService(
             throw new AppConflictException("Nenhuma etapa ativa encontrada.");
         }
 
+        if (!CanActOnStep(item.FlowDefinition, current.FlowStep, actorUserId))
+        {
+            throw new AppForbiddenException();
+        }
+
         if (current.FlowStep.Type == StepType.ApiSend || current.FlowStep.Type == StepType.ApiQuery || current.FlowStep.Type == StepType.Automatic)
         {
             throw new AppConflictException("A etapa atual eh automatica. Use o retry de integracao se necessario.");
@@ -924,10 +1005,15 @@ public sealed class InstanceManagementService(
         await automation.ProcessAsync(item.Id, cancellationToken);
     }
 
-    public async Task<InstanceDto> RetryIntegrationAsync(Guid id, CancellationToken cancellationToken)
+    public async Task<InstanceDto> RetryIntegrationAsync(Guid id, Guid? actorUserId, CancellationToken cancellationToken)
     {
         var item = await LoadInstance().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
             ?? throw new AppNotFoundException("Execucao nao encontrada.");
+
+        if (!CanViewInstance(item, actorUserId))
+        {
+            throw new AppForbiddenException();
+        }
 
         await automation.ProcessAsync(item.Id, cancellationToken, forceFailedCurrent: true);
         var reloaded = await LoadInstance().AsNoTracking().SingleAsync(x => x.Id == id, cancellationToken);
@@ -937,6 +1023,8 @@ public sealed class InstanceManagementService(
     private IQueryable<FlowInstance> LoadInstance()
     {
         return db.Instances
+            .Include(x => x.FlowDefinition)
+                .ThenInclude(x => x.AssignedUsers)
             .Include(x => x.FlowDefinition)
                 .ThenInclude(x => x.Tokens)
             .Include(x => x.FlowDefinition)
@@ -948,6 +1036,37 @@ public sealed class InstanceManagementService(
                 .ThenInclude(x => x.FlowStep)
                     .ThenInclude(x => x.Fields)
                         .ThenInclude(x => x.Options);
+    }
+
+    private static bool IsAutomaticStep(StepType stepType)
+    {
+        return stepType == StepType.ApiSend || stepType == StepType.ApiQuery || stepType == StepType.Automatic;
+    }
+
+    private static bool HasFlowAccess(FlowDefinition flow, Guid? actorUserId)
+    {
+        if (flow.AssignedUsers.Count == 0)
+        {
+            return true;
+        }
+
+        return actorUserId.HasValue && flow.AssignedUsers.Any(user => user.UserId == actorUserId.Value);
+    }
+
+    private static bool CanActOnStep(FlowDefinition flow, FlowStep step, Guid? actorUserId)
+    {
+        var assignedToStep = actorUserId.HasValue && step.AssignedUserId == actorUserId.Value;
+        return assignedToStep || HasFlowAccess(flow, actorUserId) || (flow.AssignedUsers.Count == 0 && !step.AssignedUserId.HasValue);
+    }
+
+    private static bool CanViewInstance(FlowInstance item, Guid? actorUserId)
+    {
+        if (HasFlowAccess(item.FlowDefinition, actorUserId))
+        {
+            return true;
+        }
+
+        return actorUserId.HasValue && item.StepExecutions.Any(step => step.FlowStep.AssignedUserId == actorUserId.Value);
     }
 
     private static Dictionary<string, JsonElement> MergeStepData(FlowInstance item, StepExecution current, Dictionary<string, JsonElement>? newData)

@@ -32,7 +32,14 @@ public sealed class FlowDefinition : Entity
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime? PublishedAt { get; set; }
     public List<FlowToken> Tokens { get; set; } = [];
+    public List<FlowDefinitionUser> AssignedUsers { get; set; } = [];
     public List<FlowStep> Steps { get; set; } = [];
+}
+
+public sealed class FlowDefinitionUser : Entity
+{
+    public Guid FlowDefinitionId { get; set; }
+    public Guid UserId { get; set; }
 }
 
 public sealed class FlowToken : Entity

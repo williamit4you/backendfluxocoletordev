@@ -20,8 +20,8 @@ public record BodyFieldMappingDto(string TargetKey, string SourceReference);
 public record StepScheduleAssistDto(int? IntervalMinutes = null, string? CronExpression = null, string? HelperText = null);
 public record StepApiConfigDto(string? Url, string? Method, string? TokenName, string? ScheduleMode, string? ScheduleValue, string? QueryTemplate, bool ValidateTls, IReadOnlyList<string>? SendFieldKeys = null, IReadOnlyList<ResponseFieldMappingDto>? ResponseMappings = null, IReadOnlyList<BodyFieldMappingDto>? BodyMappings = null, StepScheduleAssistDto? ScheduleAssist = null);
 public record StepDto(Guid? Id, string Name, string? Description, StepType Type, int Order, Guid? AssignedUserId, IReadOnlyList<FieldDto> Fields, StepApiConfigDto? ApiConfig);
-public record FlowDto(Guid Id, Guid FlowKey, string Name, string Description, bool Active, int VersionNumber, string LifecycleStatus, DateTime? PublishedAt, bool HasDraft, IReadOnlyList<FlowTokenDto> Tokens, IReadOnlyList<StepDto> Steps);
-public record SaveFlowRequest(string Name, string Description, bool Active, IReadOnlyList<FlowTokenDto> Tokens, IReadOnlyList<StepDto> Steps);
+public record FlowDto(Guid Id, Guid FlowKey, string Name, string Description, bool Active, int VersionNumber, string LifecycleStatus, DateTime? PublishedAt, bool HasDraft, IReadOnlyList<FlowTokenDto> Tokens, IReadOnlyList<Guid> AssignedUserIds, IReadOnlyList<StepDto> Steps);
+public record SaveFlowRequest(string Name, string Description, bool Active, IReadOnlyList<FlowTokenDto> Tokens, IReadOnlyList<Guid> AssignedUserIds, IReadOnlyList<StepDto> Steps);
 public record IntegrationAttemptDto(Guid Id, string TriggerType, string Method, string Url, int? ResponseStatusCode, bool Success, int DurationMs, DateTime CreatedAt, string? ResponsePreview, string? ErrorMessage);
 public record IntegrationTestRequest(Dictionary<string, JsonElement> Data);
 public record IntegrationTestResponse(bool Success, int? StatusCode, int DurationMs, string Url, string Method, string? ResponsePreview, string? ErrorMessage, Dictionary<string, string>? MappedFields = null);
@@ -40,6 +40,7 @@ public interface IAppDbContext
     IQueryable<FlowDefinition> Flows { get; }
     IQueryable<FlowInstance> Instances { get; }
     IQueryable<FlowToken> Tokens { get; }
+    IQueryable<FlowDefinitionUser> FlowAssignments { get; }
     IQueryable<FlowStep> Steps { get; }
     IQueryable<StepField> Fields { get; }
     IQueryable<StepFieldOption> FieldOptions { get; }
@@ -122,13 +123,14 @@ public interface IUserManagementService
 
 public interface IInstanceManagementService
 {
-    Task<IReadOnlyList<InstanceDto>> GetAllAsync(Guid? flowId, string? status, string? search, CancellationToken cancellationToken);
-    Task<InstanceDto> GetByIdAsync(Guid id, CancellationToken cancellationToken);
-    Task<Guid> CreateAsync(CreateInstanceRequest request, CancellationToken cancellationToken);
+    Task<IReadOnlyList<InstanceDto>> GetAllAsync(Guid? flowId, string? status, string? search, Guid? actorUserId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<InstanceDto>> GetPendingTasksAsync(Guid? actorUserId, CancellationToken cancellationToken);
+    Task<InstanceDto> GetByIdAsync(Guid id, Guid? actorUserId, CancellationToken cancellationToken);
+    Task<Guid> CreateAsync(CreateInstanceRequest request, Guid? actorUserId, CancellationToken cancellationToken);
     Task<InstanceDto> SaveCurrentStepDataAsync(Guid id, Dictionary<string, JsonElement> data, string? notes, Guid? actorUserId, CancellationToken cancellationToken);
     Task<InstanceDto> UploadCurrentStepFileAsync(Guid id, string fieldKey, string fileName, string? contentType, Stream stream, Guid? actorUserId, CancellationToken cancellationToken);
     Task AdvanceAsync(Guid id, AdvanceStepRequest request, Guid? actorUserId, CancellationToken cancellationToken);
-    Task<InstanceDto> RetryIntegrationAsync(Guid id, CancellationToken cancellationToken);
+    Task<InstanceDto> RetryIntegrationAsync(Guid id, Guid? actorUserId, CancellationToken cancellationToken);
 }
 
 public abstract class AppServiceException(string message) : Exception(message);

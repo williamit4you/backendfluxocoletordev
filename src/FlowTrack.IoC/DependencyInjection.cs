@@ -858,7 +858,7 @@ internal sealed class AutomaticStartWorker(
                 continue;
             }
 
-            await instances.CreateAsync(new CreateInstanceRequest(flow.Id, null, []), stoppingToken);
+            await instances.CreateAsync(new CreateInstanceRequest(flow.Id, null, []), null, stoppingToken);
             logger.LogInformation("Fluxo {FlowId} iniciado automaticamente pelo agendamento da etapa inicial.", flow.Id);
         }
     }

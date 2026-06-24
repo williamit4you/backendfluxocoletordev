@@ -8,6 +8,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
 {
     public DbSet<AppUser> AppUsers => Set<AppUser>();
     public DbSet<FlowDefinition> FlowDefinitions => Set<FlowDefinition>();
+    public DbSet<FlowDefinitionUser> FlowDefinitionUsers => Set<FlowDefinitionUser>();
     public DbSet<FlowToken> FlowTokens => Set<FlowToken>();
     public DbSet<FlowStep> FlowSteps => Set<FlowStep>();
     public DbSet<StepField> StepFields => Set<StepField>();
@@ -23,6 +24,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
     public IQueryable<FlowDefinition> Flows => FlowDefinitions;
     public IQueryable<FlowInstance> Instances => FlowInstances;
     public IQueryable<FlowToken> Tokens => FlowTokens;
+    public IQueryable<FlowDefinitionUser> FlowAssignments => FlowDefinitionUsers;
     public IQueryable<FlowStep> Steps => FlowSteps;
     public IQueryable<StepField> Fields => StepFields;
     public IQueryable<StepFieldOption> FieldOptions => StepFieldOptions;
@@ -41,11 +43,13 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
         b.HasPostgresEnum<FieldType>(); b.HasPostgresEnum<InstanceStatus>(); b.HasPostgresEnum<StepStatus>(); b.HasPostgresEnum<TokenType>(); b.HasPostgresEnum<FlowLifecycleStatus>(); b.HasPostgresEnum<IntegrationTriggerType>();
         b.Entity<AppUser>().HasIndex(x => x.Email).IsUnique();
         b.Entity<FlowToken>().HasIndex(x => new { x.FlowDefinitionId, x.Name }).IsUnique();
+        b.Entity<FlowDefinitionUser>().HasIndex(x => new { x.FlowDefinitionId, x.UserId }).IsUnique();
         b.Entity<FlowStep>().HasIndex(x => new { x.FlowDefinitionId, x.Order }).IsUnique();
         b.Entity<FlowDefinition>().HasIndex(x => new { x.FlowKey, x.VersionNumber }).IsUnique();
         b.Entity<StepField>().HasIndex(x => new { x.FlowStepId, x.Key }).IsUnique();
         b.Entity<StepFieldOption>().HasIndex(x => new { x.StepFieldId, x.Order }).IsUnique();
         b.Entity<FlowDefinition>().HasMany(x => x.Tokens).WithOne().HasForeignKey(x => x.FlowDefinitionId).OnDelete(DeleteBehavior.Cascade);
+        b.Entity<FlowDefinition>().HasMany(x => x.AssignedUsers).WithOne().HasForeignKey(x => x.FlowDefinitionId).OnDelete(DeleteBehavior.Cascade);
         b.Entity<FlowDefinition>().HasMany(x => x.Steps).WithOne().HasForeignKey(x => x.FlowDefinitionId).OnDelete(DeleteBehavior.Cascade);
         b.Entity<FlowStep>().HasMany(x => x.Fields).WithOne().HasForeignKey(x => x.FlowStepId).OnDelete(DeleteBehavior.Cascade);
         b.Entity<StepField>().HasMany(x => x.Options).WithOne().HasForeignKey(x => x.StepFieldId).OnDelete(DeleteBehavior.Cascade);

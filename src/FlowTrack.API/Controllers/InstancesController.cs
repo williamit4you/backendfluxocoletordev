@@ -19,7 +19,13 @@ public sealed class InstancesController(IInstanceManagementService instances) : 
     [HttpGet]
     public async Task<ActionResult<IReadOnlyList<InstanceDto>>> GetAll([FromQuery] Guid? flowId, [FromQuery] string? status, [FromQuery] string? search)
     {
-        return Ok(await instances.GetAllAsync(flowId, status, search, HttpContext.RequestAborted));
+        return Ok(await instances.GetAllAsync(flowId, status, search, TryGetCurrentUserId(), HttpContext.RequestAborted));
+    }
+
+    [HttpGet("pending-tasks")]
+    public async Task<ActionResult<IReadOnlyList<InstanceDto>>> GetPendingTasks()
+    {
+        return Ok(await instances.GetPendingTasksAsync(TryGetCurrentUserId(), HttpContext.RequestAborted));
     }
 
     [HttpGet("{id:guid}")]
@@ -27,11 +33,15 @@ public sealed class InstancesController(IInstanceManagementService instances) : 
     {
         try
         {
-            return Ok(await instances.GetByIdAsync(id, HttpContext.RequestAborted));
+            return Ok(await instances.GetByIdAsync(id, TryGetCurrentUserId(), HttpContext.RequestAborted));
         }
         catch (AppNotFoundException)
         {
             return NotFound();
+        }
+        catch (AppForbiddenException)
+        {
+            return Forbid();
         }
     }
 
@@ -40,7 +50,7 @@ public sealed class InstancesController(IInstanceManagementService instances) : 
     {
         try
         {
-            var id = await instances.CreateAsync(request, HttpContext.RequestAborted);
+            var id = await instances.CreateAsync(request, TryGetCurrentUserId(), HttpContext.RequestAborted);
             return Created($"/api/instances/{id}", new { Id = id });
         }
         catch (AppValidationException ex)
@@ -50,6 +60,10 @@ public sealed class InstancesController(IInstanceManagementService instances) : 
         catch (AppNotFoundException)
         {
             return NotFound();
+        }
+        catch (AppForbiddenException)
+        {
+            return Forbid();
         }
     }
 
@@ -68,6 +82,10 @@ public sealed class InstancesController(IInstanceManagementService instances) : 
         catch (AppConflictException ex)
         {
             return Conflict(new { message = ex.Message });
+        }
+        catch (AppForbiddenException)
+        {
+            return Forbid();
         }
     }
 
@@ -89,6 +107,10 @@ public sealed class InstancesController(IInstanceManagementService instances) : 
         catch (AppConflictException ex)
         {
             return Conflict(new { message = ex.Message });
+        }
+        catch (AppForbiddenException)
+        {
+            return Forbid();
         }
     }
 
@@ -113,6 +135,10 @@ public sealed class InstancesController(IInstanceManagementService instances) : 
         {
             return Conflict(new { message = ex.Message });
         }
+        catch (AppForbiddenException)
+        {
+            return Forbid();
+        }
     }
 
     [HttpPost("{id:guid}/retry-integration")]
@@ -120,11 +146,15 @@ public sealed class InstancesController(IInstanceManagementService instances) : 
     {
         try
         {
-            return Ok(await instances.RetryIntegrationAsync(id, HttpContext.RequestAborted));
+            return Ok(await instances.RetryIntegrationAsync(id, TryGetCurrentUserId(), HttpContext.RequestAborted));
         }
         catch (AppNotFoundException)
         {
             return NotFound();
+        }
+        catch (AppForbiddenException)
+        {
+            return Forbid();
         }
     }
 
