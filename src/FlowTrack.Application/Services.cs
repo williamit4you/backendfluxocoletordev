@@ -1056,14 +1056,30 @@ public sealed class InstanceManagementService(
         var target = item.StepExecutions.SingleOrDefault(x => x.Id == stepExecutionId)
             ?? throw new AppNotFoundException("Etapa da execucao nao encontrada.");
 
+        var current = item.StepExecutions.SingleOrDefault(x => x.Status == StepStatus.InProgress || x.Status == StepStatus.Failed);
+        var isCurrentStep = current?.Id == target.Id;
+        var isAutomaticType = target.FlowStep.Type == StepType.ApiSend || target.FlowStep.Type == StepType.ApiQuery || target.FlowStep.Type == StepType.Automatic;
+
+        if (!isAutomaticType)
+        {
+            throw new AppConflictException("A etapa selecionada nao suporta reprocessamento manual.");
+        }
+
+        if (isCurrentStep)
+        {
+            await automation.ProcessAsync(item.Id, cancellationToken, forceFailedCurrent: target.Status == StepStatus.Failed);
+            var reloadedCurrent = await LoadInstance().AsNoTracking().SingleAsync(x => x.Id == id, cancellationToken);
+            return await ToDtoAsync(reloadedCurrent, cancellationToken);
+        }
+
         if (target.Status != StepStatus.Completed)
         {
-            throw new AppConflictException("Somente etapas concluidas podem ser reprocessadas manualmente.");
+            throw new AppConflictException("Somente a etapa automatica atual ou etapas concluidas podem ser reprocessadas manualmente.");
         }
 
         if (target.FlowStep.Type != StepType.ApiSend && target.FlowStep.Type != StepType.ApiQuery)
         {
-            throw new AppConflictException("A etapa selecionada nao suporta reprocessamento manual.");
+            throw new AppConflictException("Reprocessamento de etapa concluida esta disponivel apenas para integracoes.");
         }
 
         var mergedData = MergeStepData(item, target, null);
