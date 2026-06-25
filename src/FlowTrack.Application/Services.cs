@@ -1101,7 +1101,13 @@ public sealed class InstanceManagementService(
             return true;
         }
 
-        return actorUserId.HasValue && item.StepExecutions.Any(step => step.FlowStep.AssignedUsers.Any(user => user.UserId == actorUserId.Value));
+        var currentStep = item.StepExecutions.SingleOrDefault(step => step.Status == StepStatus.InProgress);
+        if (currentStep is null || !actorUserId.HasValue)
+        {
+            return false;
+        }
+
+        return currentStep.FlowStep.AssignedUsers.Any(user => user.UserId == actorUserId.Value);
     }
 
     private static Dictionary<string, JsonElement> MergeStepData(FlowInstance item, StepExecution current, Dictionary<string, JsonElement>? newData)
