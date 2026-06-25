@@ -646,6 +646,20 @@ internal sealed class InstanceAutomationService(
                 return;
             }
 
+            if (stepType == StepType.ApiQuery)
+            {
+                var config = string.IsNullOrWhiteSpace(current.FlowStep.ConfigurationJson)
+                    ? null
+                    : JsonSerializer.Deserialize<StepApiConfigDto>(current.FlowStep.ConfigurationJson);
+
+                if (config is not null
+                    && !string.Equals(config.ScheduleMode, "manual", StringComparison.OrdinalIgnoreCase)
+                    && !ScheduleRuntimeHelper.IsDue(config, null, current.StartedAt ?? DateTime.UtcNow, DateTime.UtcNow))
+                {
+                    return;
+                }
+            }
+
             var result = await integrations.ExecuteAsync(item.FlowDefinition, current.FlowStep, currentData, cancellationToken, item, current, IntegrationTriggerType.Runtime);
             if (!result.Success)
             {
@@ -769,7 +783,7 @@ internal sealed class ApiQueryWorker(
                 ? null
                 : JsonSerializer.Deserialize<StepApiConfigDto>(current.FlowStep.ConfigurationJson);
 
-            if (config is null || !IsDue(config, db, instance.Id, current.FlowStepId))
+            if (config is null || !IsDue(config, db, instance.Id, current.FlowStepId, current.StartedAt))
             {
                 continue;
             }
@@ -778,15 +792,15 @@ internal sealed class ApiQueryWorker(
         }
     }
 
-    private static bool IsDue(StepApiConfigDto config, AppDbContext db, Guid instanceId, Guid stepId)
+    private static bool IsDue(StepApiConfigDto config, AppDbContext db, Guid instanceId, Guid stepId, DateTime? stepStartedAtUtc)
     {
         var lastAttempt = db.IntegrationAttempts
             .AsNoTracking()
             .Where(x => x.FlowInstanceId == instanceId && x.FlowStepId == stepId && x.TriggerType == IntegrationTriggerType.Runtime)
             .OrderByDescending(x => x.CreatedAt)
             .FirstOrDefault();
-        var reference = lastAttempt?.CreatedAt ?? DateTime.UtcNow.AddMinutes(-1);
-        return ScheduleRuntimeHelper.IsDue(config, lastAttempt?.CreatedAt, reference, DateTime.UtcNow, allowImmediateFirstIntervalRun: true);
+        var reference = lastAttempt?.CreatedAt ?? stepStartedAtUtc ?? DateTime.UtcNow;
+        return ScheduleRuntimeHelper.IsDue(config, lastAttempt?.CreatedAt, reference, DateTime.UtcNow);
     }
 }
 
