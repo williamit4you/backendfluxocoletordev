@@ -607,6 +607,7 @@ internal sealed class WorkerMonitor : IWorkerMonitor
 internal sealed class InstanceAutomationService(
     AppDbContext db,
     IIntegrationExecutionService integrations,
+    IConfiguration appConfig,
     ILogger<InstanceAutomationService> logger) : IInstanceAutomationService
 {
     public async Task ProcessAsync(Guid instanceId, CancellationToken cancellationToken, bool forceFailedCurrent = false)
@@ -651,10 +652,11 @@ internal sealed class InstanceAutomationService(
                 var config = string.IsNullOrWhiteSpace(current.FlowStep.ConfigurationJson)
                     ? null
                     : JsonSerializer.Deserialize<StepApiConfigDto>(current.FlowStep.ConfigurationJson);
+                var scheduleTimeZone = ScheduleRuntimeHelper.ResolveTimeZone(appConfig["Scheduling:TimeZoneId"]);
 
                 if (config is not null
                     && !string.Equals(config.ScheduleMode, "manual", StringComparison.OrdinalIgnoreCase)
-                    && !ScheduleRuntimeHelper.IsDue(config, null, current.StartedAt ?? DateTime.UtcNow, DateTime.UtcNow))
+                    && !ScheduleRuntimeHelper.IsDue(config, null, current.StartedAt ?? DateTime.UtcNow, DateTime.UtcNow, timeZone: scheduleTimeZone))
                 {
                     return;
                 }
@@ -678,6 +680,7 @@ internal sealed class InstanceAutomationService(
                     currentData[mapped.Key] = mapped.Value;
                 }
 
+                current.DataJson = JsonSerializer.Serialize(currentData);
                 item.DataJson = JsonSerializer.Serialize(currentData);
             }
 
@@ -728,6 +731,7 @@ internal sealed class InstanceAutomationService(
 
 internal sealed class ApiQueryWorker(
     IServiceScopeFactory scopeFactory,
+    IConfiguration appConfig,
     IWorkerMonitor workerMonitor,
     ILogger<ApiQueryWorker> logger) : BackgroundService
 {
@@ -763,6 +767,7 @@ internal sealed class ApiQueryWorker(
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         var automation = scope.ServiceProvider.GetRequiredService<IInstanceAutomationService>();
+        var scheduleTimeZone = ScheduleRuntimeHelper.ResolveTimeZone(appConfig["Scheduling:TimeZoneId"]);
 
         var candidates = await db.FlowInstances
             .AsNoTracking()
@@ -783,7 +788,7 @@ internal sealed class ApiQueryWorker(
                 ? null
                 : JsonSerializer.Deserialize<StepApiConfigDto>(current.FlowStep.ConfigurationJson);
 
-            if (config is null || !IsDue(config, db, instance.Id, current.FlowStepId, current.StartedAt))
+            if (config is null || !IsDue(config, db, instance.Id, current.FlowStepId, current.StartedAt, scheduleTimeZone))
             {
                 continue;
             }
@@ -792,7 +797,7 @@ internal sealed class ApiQueryWorker(
         }
     }
 
-    private static bool IsDue(StepApiConfigDto config, AppDbContext db, Guid instanceId, Guid stepId, DateTime? stepStartedAtUtc)
+    private static bool IsDue(StepApiConfigDto config, AppDbContext db, Guid instanceId, Guid stepId, DateTime? stepStartedAtUtc, TimeZoneInfo timeZone)
     {
         var lastAttempt = db.IntegrationAttempts
             .AsNoTracking()
@@ -800,12 +805,13 @@ internal sealed class ApiQueryWorker(
             .OrderByDescending(x => x.CreatedAt)
             .FirstOrDefault();
         var reference = lastAttempt?.CreatedAt ?? stepStartedAtUtc ?? DateTime.UtcNow;
-        return ScheduleRuntimeHelper.IsDue(config, lastAttempt?.CreatedAt, reference, DateTime.UtcNow);
+        return ScheduleRuntimeHelper.IsDue(config, lastAttempt?.CreatedAt, reference, DateTime.UtcNow, timeZone: timeZone);
     }
 }
 
 internal sealed class AutomaticStartWorker(
     IServiceScopeFactory scopeFactory,
+    IConfiguration appConfig,
     ILogger<AutomaticStartWorker> logger) : BackgroundService
 {
     private static readonly SemaphoreSlim Gate = new(1, 1);
@@ -837,6 +843,7 @@ internal sealed class AutomaticStartWorker(
         await using var scope = scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         var instances = scope.ServiceProvider.GetRequiredService<IInstanceManagementService>();
+        var scheduleTimeZone = ScheduleRuntimeHelper.ResolveTimeZone(appConfig["Scheduling:TimeZoneId"]);
 
         var flows = await db.FlowDefinitions
             .AsNoTracking()
@@ -867,7 +874,7 @@ internal sealed class AutomaticStartWorker(
                 .FirstOrDefaultAsync(stoppingToken);
 
             var reference = flow.PublishedAt ?? flow.CreatedAt;
-            if (!ScheduleRuntimeHelper.IsDue(config, lastCreatedAt, reference, now))
+            if (!ScheduleRuntimeHelper.IsDue(config, lastCreatedAt, reference, now, timeZone: scheduleTimeZone))
             {
                 continue;
             }
@@ -885,7 +892,8 @@ internal static class ScheduleRuntimeHelper
         DateTime? lastRunAtUtc,
         DateTime referenceUtc,
         DateTime nowUtc,
-        bool allowImmediateFirstIntervalRun = false)
+        bool allowImmediateFirstIntervalRun = false,
+        TimeZoneInfo? timeZone = null)
     {
         if (string.Equals(config.ScheduleMode, "manual", StringComparison.OrdinalIgnoreCase))
         {
@@ -913,8 +921,35 @@ internal static class ScheduleRuntimeHelper
             return false;
         }
 
+        var resolvedTimeZone = timeZone ?? TimeZoneInfo.Utc;
         var windowStart = lastRunAtUtc ?? referenceUtc;
-        return HasCronOccurrenceBetween(config.ScheduleValue, windowStart, nowUtc);
+        return HasCronOccurrenceBetween(config.ScheduleValue, windowStart, nowUtc, resolvedTimeZone);
+    }
+
+    public static TimeZoneInfo ResolveTimeZone(string? configuredId)
+    {
+        var candidates = new[]
+        {
+            configuredId,
+            "America/Sao_Paulo",
+            "E. South America Standard Time",
+            TimeZoneInfo.Local.Id,
+            TimeZoneInfo.Utc.Id
+        };
+
+        foreach (var candidate in candidates.Where(value => !string.IsNullOrWhiteSpace(value)).Cast<string>())
+        {
+            try
+            {
+                return TimeZoneInfo.FindSystemTimeZoneById(candidate);
+            }
+            catch
+            {
+                // Try the next candidate.
+            }
+        }
+
+        return TimeZoneInfo.Utc;
     }
 
     private static int ParseIntervalMinutes(string? value)
@@ -928,7 +963,7 @@ internal static class ScheduleRuntimeHelper
         return int.TryParse(digits, out var minutes) ? Math.Max(minutes, 1) : 0;
     }
 
-    private static bool HasCronOccurrenceBetween(string? value, DateTime startExclusiveUtc, DateTime endInclusiveUtc)
+    private static bool HasCronOccurrenceBetween(string? value, DateTime startExclusiveUtc, DateTime endInclusiveUtc, TimeZoneInfo timeZone)
     {
         if (string.IsNullOrWhiteSpace(value))
         {
@@ -941,8 +976,10 @@ internal static class ScheduleRuntimeHelper
             return false;
         }
 
-        var probe = new DateTime(startExclusiveUtc.Year, startExclusiveUtc.Month, startExclusiveUtc.Day, startExclusiveUtc.Hour, startExclusiveUtc.Minute, 0, DateTimeKind.Utc).AddMinutes(1);
-        var limit = new DateTime(endInclusiveUtc.Year, endInclusiveUtc.Month, endInclusiveUtc.Day, endInclusiveUtc.Hour, endInclusiveUtc.Minute, 0, DateTimeKind.Utc);
+        var startLocal = TimeZoneInfo.ConvertTimeFromUtc(startExclusiveUtc, timeZone);
+        var endLocal = TimeZoneInfo.ConvertTimeFromUtc(endInclusiveUtc, timeZone);
+        var probe = new DateTime(startLocal.Year, startLocal.Month, startLocal.Day, startLocal.Hour, startLocal.Minute, 0, DateTimeKind.Unspecified).AddMinutes(1);
+        var limit = new DateTime(endLocal.Year, endLocal.Month, endLocal.Day, endLocal.Hour, endLocal.Minute, 0, DateTimeKind.Unspecified);
         var minimumProbe = limit.AddDays(-32);
         if (probe < minimumProbe)
         {
@@ -962,13 +999,13 @@ internal static class ScheduleRuntimeHelper
         return false;
     }
 
-    private static bool MatchesCron(IReadOnlyList<string> parts, DateTime instantUtc)
+    private static bool MatchesCron(IReadOnlyList<string> parts, DateTime instantLocal)
     {
-        return MatchesCronPart(parts[0], instantUtc.Minute, 0, 59)
-            && MatchesCronPart(parts[1], instantUtc.Hour, 0, 23)
-            && MatchesCronPart(parts[2], instantUtc.Day, 1, 31)
-            && MatchesCronPart(parts[3], instantUtc.Month, 1, 12)
-            && MatchesCronPart(parts[4], NormalizeDayOfWeek(instantUtc.DayOfWeek), 0, 7);
+        return MatchesCronPart(parts[0], instantLocal.Minute, 0, 59)
+            && MatchesCronPart(parts[1], instantLocal.Hour, 0, 23)
+            && MatchesCronPart(parts[2], instantLocal.Day, 1, 31)
+            && MatchesCronPart(parts[3], instantLocal.Month, 1, 12)
+            && MatchesCronPart(parts[4], NormalizeDayOfWeek(instantLocal.DayOfWeek), 0, 7);
     }
 
     private static int NormalizeDayOfWeek(DayOfWeek dayOfWeek)
