@@ -132,6 +132,7 @@ public interface IInstanceManagementService
     Task<InstanceDto> UploadCurrentStepFileAsync(Guid id, string fieldKey, string fileName, string? contentType, Stream stream, Guid? actorUserId, CancellationToken cancellationToken);
     Task AdvanceAsync(Guid id, AdvanceStepRequest request, Guid? actorUserId, CancellationToken cancellationToken);
     Task<InstanceDto> RetryIntegrationAsync(Guid id, Guid? actorUserId, CancellationToken cancellationToken);
+    Task<InstanceDto> ReprocessStepAsync(Guid id, Guid stepExecutionId, Guid? actorUserId, CancellationToken cancellationToken);
 }
 
 public abstract class AppServiceException(string message) : Exception(message);

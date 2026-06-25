@@ -755,6 +755,7 @@ public sealed class UserManagementService(
 public sealed class InstanceManagementService(
     IAppDbContext db,
     IInstanceAutomationService automation,
+    IIntegrationExecutionService integrations,
     IFileStorageService fileStorage) : IInstanceManagementService
 {
     public async Task<IReadOnlyList<InstanceDto>> GetAllAsync(Guid? flowId, string? status, string? search, Guid? actorUserId, CancellationToken cancellationToken)
@@ -1038,6 +1039,54 @@ public sealed class InstanceManagementService(
         }
 
         await automation.ProcessAsync(item.Id, cancellationToken, forceFailedCurrent: true);
+        var reloaded = await LoadInstance().AsNoTracking().SingleAsync(x => x.Id == id, cancellationToken);
+        return await ToDtoAsync(reloaded, cancellationToken);
+    }
+
+    public async Task<InstanceDto> ReprocessStepAsync(Guid id, Guid stepExecutionId, Guid? actorUserId, CancellationToken cancellationToken)
+    {
+        var item = await LoadInstance().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
+            ?? throw new AppNotFoundException("Execucao nao encontrada.");
+
+        if (!CanViewInstance(item, actorUserId))
+        {
+            throw new AppForbiddenException();
+        }
+
+        var target = item.StepExecutions.SingleOrDefault(x => x.Id == stepExecutionId)
+            ?? throw new AppNotFoundException("Etapa da execucao nao encontrada.");
+
+        if (target.Status != StepStatus.Completed)
+        {
+            throw new AppConflictException("Somente etapas concluidas podem ser reprocessadas manualmente.");
+        }
+
+        if (target.FlowStep.Type != StepType.ApiSend && target.FlowStep.Type != StepType.ApiQuery)
+        {
+            throw new AppConflictException("A etapa selecionada nao suporta reprocessamento manual.");
+        }
+
+        var mergedData = MergeStepData(item, target, null);
+        var result = await integrations.ExecuteAsync(item.FlowDefinition, target.FlowStep, mergedData, cancellationToken, item, target, IntegrationTriggerType.Runtime);
+
+        target.Notes = result.Success
+            ? "Etapa reprocessada manualmente."
+            : result.ErrorMessage ?? "Falha no reprocessamento manual.";
+
+        if (result.Success && target.FlowStep.Type == StepType.ApiQuery && result.MappedData is not null)
+        {
+            foreach (var mapped in result.MappedData)
+            {
+                mergedData[mapped.Key] = mapped.Value;
+            }
+
+            target.DataJson = JsonSerializer.Serialize(mergedData);
+            item.DataJson = MergeInstanceData(item.DataJson, mergedData);
+        }
+
+        item.UpdatedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(cancellationToken);
+
         var reloaded = await LoadInstance().AsNoTracking().SingleAsync(x => x.Id == id, cancellationToken);
         return await ToDtoAsync(reloaded, cancellationToken);
     }
