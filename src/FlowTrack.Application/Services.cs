@@ -82,12 +82,10 @@ public sealed class FlowManagementService(
             throw new AppConflictException("Somente versoes em rascunho podem ser alteradas. Gere um rascunho antes de editar.");
         }
 
-        db.RemoveRange(flow.Steps.SelectMany(x => x.Fields).SelectMany(x => x.Options));
-        db.RemoveRange(flow.Steps.SelectMany(x => x.Fields));
-        db.RemoveRange(flow.Steps.SelectMany(x => x.AssignedUsers));
-        db.RemoveRange(flow.Steps);
-        db.RemoveRange(flow.Tokens);
-        db.RemoveRange(flow.AssignedUsers);
+        // Remove only the root children and let EF/database cascade delete the nested graph.
+        db.RemoveRange(flow.Steps.ToList());
+        db.RemoveRange(flow.Tokens.ToList());
+        db.RemoveRange(flow.AssignedUsers.ToList());
 
         Apply(flow, request);
         await db.SaveChangesAsync(cancellationToken);
