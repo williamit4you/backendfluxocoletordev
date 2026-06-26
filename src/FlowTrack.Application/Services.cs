@@ -80,7 +80,7 @@ public sealed class FlowManagementService(
                 ?? throw new InvalidOperationException("O contexto de dados nao suporta operacoes transacionais para atualizar o fluxo.");
             await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
 
-            var flow = await LoadFlows().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
+            var flow = await db.Flows.SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
                 ?? throw new AppNotFoundException("Fluxo nao encontrado.");
 
             if (flow.LifecycleStatus != FlowLifecycleStatus.Draft)
@@ -113,14 +113,51 @@ public sealed class FlowManagementService(
                 return replacementDraft.Id;
             }
 
-            // Remove only the root children and let EF/database cascade delete the nested graph.
-            db.RemoveRange(flow.Steps.ToList());
-            db.RemoveRange(flow.Tokens.ToList());
-            db.RemoveRange(flow.AssignedUsers.ToList());
-            await db.SaveChangesAsync(cancellationToken);
+            var stepIds = await db.Steps
+                .Where(x => x.FlowDefinitionId == flow.Id)
+                .Select(x => x.Id)
+                .ToListAsync(cancellationToken);
+
+            var fieldIds = stepIds.Count == 0
+                ? []
+                : await db.Fields
+                    .Where(x => stepIds.Contains(x.FlowStepId))
+                    .Select(x => x.Id)
+                    .ToListAsync(cancellationToken);
+
+            if (fieldIds.Count > 0)
+            {
+                await db.FieldOptions
+                    .Where(x => fieldIds.Contains(x.StepFieldId))
+                    .ExecuteDeleteAsync(cancellationToken);
+            }
+
+            if (stepIds.Count > 0)
+            {
+                await db.Fields
+                    .Where(x => stepIds.Contains(x.FlowStepId))
+                    .ExecuteDeleteAsync(cancellationToken);
+
+                await db.StepAssignments
+                    .Where(x => stepIds.Contains(x.FlowStepId))
+                    .ExecuteDeleteAsync(cancellationToken);
+
+                await db.Steps
+                    .Where(x => x.FlowDefinitionId == flow.Id)
+                    .ExecuteDeleteAsync(cancellationToken);
+            }
+
+            await db.Tokens
+                .Where(x => x.FlowDefinitionId == flow.Id)
+                .ExecuteDeleteAsync(cancellationToken);
+
+            await db.FlowAssignments
+                .Where(x => x.FlowDefinitionId == flow.Id)
+                .ExecuteDeleteAsync(cancellationToken);
+
             dbContext.ChangeTracker.Clear();
 
-            flow = await LoadFlows().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
+            flow = await db.Flows.SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
                 ?? throw new AppNotFoundException("Fluxo nao encontrado.");
 
             Apply(flow, request);
