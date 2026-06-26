@@ -23,9 +23,9 @@ public sealed class FlowManagementService(
         if (normalizedScope == "runtime")
         {
             return rows
-                .Where(x => x.Active && x.LifecycleStatus == FlowLifecycleStatus.Published)
+                .Where(x => x.Active)
                 .GroupBy(x => x.FlowKey)
-                .Select(group => group.OrderByDescending(x => x.VersionNumber).First())
+                .Select(group => FlowRuntimeSelectionHelper.SelectEffectiveVersion(group)!)
                 .Select(flow => ToDto(flow))
                 .ToList();
         }
@@ -849,13 +849,23 @@ public sealed class InstanceManagementService(
 
     public async Task<Guid> CreateAsync(CreateInstanceRequest request, Guid? actorUserId, CancellationToken cancellationToken)
     {
-        var flow = await db.Flows
+        var requestedFlow = await db.Flows
             .Include(x => x.Tokens)
             .Include(x => x.AssignedUsers)
             .Include(x => x.Steps)
                 .ThenInclude(x => x.Fields)
-            .SingleOrDefaultAsync(x => x.Id == request.FlowDefinitionId && x.Active && x.LifecycleStatus == FlowLifecycleStatus.Published, cancellationToken)
-            ?? throw new AppNotFoundException("Fluxo publicado nao encontrado.");
+            .SingleOrDefaultAsync(x => x.Id == request.FlowDefinitionId && x.Active, cancellationToken)
+            ?? throw new AppNotFoundException("Fluxo nao encontrado.");
+
+        var relatedVersions = await db.Flows
+            .Include(x => x.Tokens)
+            .Include(x => x.AssignedUsers)
+            .Include(x => x.Steps)
+                .ThenInclude(x => x.Fields)
+            .Where(x => x.FlowKey == requestedFlow.FlowKey && x.Active)
+            .ToListAsync(cancellationToken);
+
+        var flow = FlowRuntimeSelectionHelper.SelectEffectiveVersion(relatedVersions) ?? requestedFlow;
 
         if (!HasFlowAccess(flow, actorUserId))
         {
@@ -1480,5 +1490,16 @@ public sealed class InstanceManagementService(
                             .ToList());
                 })
                 .ToList());
+    }
+}
+
+public static class FlowRuntimeSelectionHelper
+{
+    public static FlowDefinition? SelectEffectiveVersion(IEnumerable<FlowDefinition> versions)
+    {
+        return versions
+            .OrderByDescending(x => x.LifecycleStatus == FlowLifecycleStatus.Draft)
+            .ThenByDescending(x => x.VersionNumber)
+            .FirstOrDefault();
     }
 }

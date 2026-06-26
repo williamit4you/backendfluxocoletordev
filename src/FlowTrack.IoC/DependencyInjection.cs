@@ -845,11 +845,16 @@ internal sealed class AutomaticStartWorker(
         var instances = scope.ServiceProvider.GetRequiredService<IInstanceManagementService>();
         var scheduleTimeZone = ScheduleRuntimeHelper.ResolveTimeZone(appConfig["Scheduling:TimeZoneId"]);
 
-        var flows = await db.FlowDefinitions
+        var flows = (await db.FlowDefinitions
             .AsNoTracking()
             .Include(x => x.Steps)
-            .Where(x => x.Active && x.LifecycleStatus == FlowLifecycleStatus.Published)
-            .ToListAsync(stoppingToken);
+            .Where(x => x.Active)
+            .ToListAsync(stoppingToken))
+            .GroupBy(x => x.FlowKey)
+            .Select(group => FlowRuntimeSelectionHelper.SelectEffectiveVersion(group))
+            .Where(flow => flow is not null)
+            .Cast<FlowDefinition>()
+            .ToList();
 
         var now = DateTime.UtcNow;
         foreach (var flow in flows)
@@ -866,9 +871,15 @@ internal sealed class AutomaticStartWorker(
                 continue;
             }
 
+            var flowVersionIds = await db.FlowDefinitions
+                .AsNoTracking()
+                .Where(candidate => candidate.FlowKey == flow.FlowKey)
+                .Select(candidate => candidate.Id)
+                .ToListAsync(stoppingToken);
+
             var lastCreatedAt = await db.FlowInstances
                 .AsNoTracking()
-                .Where(instance => instance.FlowDefinitionId == flow.Id)
+                .Where(instance => flowVersionIds.Contains(instance.FlowDefinitionId))
                 .OrderByDescending(instance => instance.CreatedAt)
                 .Select(instance => (DateTime?)instance.CreatedAt)
                 .FirstOrDefaultAsync(stoppingToken);
