@@ -663,6 +663,19 @@ internal sealed class InstanceAutomationService(
             }
 
             var result = await integrations.ExecuteAsync(item.FlowDefinition, current.FlowStep, currentData, cancellationToken, item, current, IntegrationTriggerType.Runtime);
+            MergeIntegrationResultIntoExecutionData(currentData, result);
+
+            if (stepType == StepType.ApiQuery && result.MappedData is not null)
+            {
+                foreach (var mapped in result.MappedData)
+                {
+                    currentData[mapped.Key] = mapped.Value;
+                }
+            }
+
+            current.DataJson = JsonSerializer.Serialize(currentData);
+            item.DataJson = JsonSerializer.Serialize(currentData);
+
             if (!result.Success)
             {
                 logger.LogWarning("Falha de integracao na instancia {InstanceId}, etapa {StepId}: {Error}", item.Id, current.FlowStepId, result.ErrorMessage);
@@ -671,17 +684,6 @@ internal sealed class InstanceAutomationService(
                 item.UpdatedAt = DateTime.UtcNow;
                 await db.SaveChangesAsync(cancellationToken);
                 return;
-            }
-
-            if (stepType == StepType.ApiQuery && result.MappedData is not null)
-            {
-                foreach (var mapped in result.MappedData)
-                {
-                    currentData[mapped.Key] = mapped.Value;
-                }
-
-                current.DataJson = JsonSerializer.Serialize(currentData);
-                item.DataJson = JsonSerializer.Serialize(currentData);
             }
 
             CompleteCurrentStep(item, current, "Etapa de integracao concluida automaticamente.", null);
@@ -726,6 +728,30 @@ internal sealed class InstanceAutomationService(
         }
 
         item.UpdatedAt = now;
+    }
+
+    private static void MergeIntegrationResultIntoExecutionData(Dictionary<string, JsonElement> currentData, IntegrationExecutionResult result)
+    {
+        currentData["_integration.success"] = JsonSerializer.SerializeToElement(result.Success);
+        currentData["_integration.method"] = JsonSerializer.SerializeToElement(result.Method);
+        currentData["_integration.url"] = JsonSerializer.SerializeToElement(result.Url);
+        currentData["_integration.durationMs"] = JsonSerializer.SerializeToElement(result.DurationMs);
+        currentData["_integration.executedAtUtc"] = JsonSerializer.SerializeToElement(DateTime.UtcNow);
+
+        if (result.StatusCode.HasValue)
+        {
+            currentData["_integration.statusCode"] = JsonSerializer.SerializeToElement(result.StatusCode.Value);
+        }
+
+        if (!string.IsNullOrWhiteSpace(result.ResponsePreview))
+        {
+            currentData["_integration.responsePreview"] = JsonSerializer.SerializeToElement(result.ResponsePreview);
+        }
+
+        if (!string.IsNullOrWhiteSpace(result.ErrorMessage))
+        {
+            currentData["_integration.errorMessage"] = JsonSerializer.SerializeToElement(result.ErrorMessage);
+        }
     }
 }
 
