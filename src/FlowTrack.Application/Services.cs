@@ -127,33 +127,41 @@ public sealed class FlowManagementService(
 
             if (fieldIds.Count > 0)
             {
-                await db.FieldOptions
+                var optionsToRemove = await dbContext.Set<StepFieldOption>()
                     .Where(x => fieldIds.Contains(x.StepFieldId))
-                    .ExecuteDeleteAsync(cancellationToken);
+                    .ToListAsync(cancellationToken);
+                dbContext.RemoveRange(optionsToRemove);
             }
 
             if (stepIds.Count > 0)
             {
-                await db.Fields
+                var fieldsToRemove = await dbContext.Set<StepField>()
                     .Where(x => stepIds.Contains(x.FlowStepId))
-                    .ExecuteDeleteAsync(cancellationToken);
+                    .ToListAsync(cancellationToken);
+                dbContext.RemoveRange(fieldsToRemove);
 
-                await db.StepAssignments
+                var stepAssignmentsToRemove = await dbContext.Set<FlowStepUser>()
                     .Where(x => stepIds.Contains(x.FlowStepId))
-                    .ExecuteDeleteAsync(cancellationToken);
+                    .ToListAsync(cancellationToken);
+                dbContext.RemoveRange(stepAssignmentsToRemove);
 
-                await db.Steps
+                var stepsToRemove = await dbContext.Set<FlowStep>()
                     .Where(x => x.FlowDefinitionId == flow.Id)
-                    .ExecuteDeleteAsync(cancellationToken);
+                    .ToListAsync(cancellationToken);
+                dbContext.RemoveRange(stepsToRemove);
             }
 
-            await db.Tokens
+            var tokensToRemove = await dbContext.Set<FlowToken>()
                 .Where(x => x.FlowDefinitionId == flow.Id)
-                .ExecuteDeleteAsync(cancellationToken);
+                .ToListAsync(cancellationToken);
+            dbContext.RemoveRange(tokensToRemove);
 
-            await db.FlowAssignments
+            var flowAssignmentsToRemove = await dbContext.Set<FlowDefinitionUser>()
                 .Where(x => x.FlowDefinitionId == flow.Id)
-                .ExecuteDeleteAsync(cancellationToken);
+                .ToListAsync(cancellationToken);
+            dbContext.RemoveRange(flowAssignmentsToRemove);
+
+            await db.SaveChangesAsync(cancellationToken);
 
             dbContext.ChangeTracker.Clear();
 
