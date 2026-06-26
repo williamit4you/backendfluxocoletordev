@@ -115,62 +115,14 @@ public sealed class FlowManagementService(
                 return replacementDraft.Id;
             }
 
-            var stepIds = await db.Steps
-                .Where(x => x.FlowDefinitionId == flow.Id)
-                .Select(x => x.Id)
-                .ToListAsync(cancellationToken);
-
-            var fieldIds = stepIds.Count == 0
-                ? []
-                : await db.Fields
-                    .Where(x => stepIds.Contains(x.FlowStepId))
-                    .Select(x => x.Id)
-                    .ToListAsync(cancellationToken);
-
-            if (fieldIds.Count > 0)
-            {
-                var optionsToRemove = await dbContext.Set<StepFieldOption>()
-                    .Where(x => fieldIds.Contains(x.StepFieldId))
-                    .ToListAsync(cancellationToken);
-                dbContext.RemoveRange(optionsToRemove);
-            }
-
-            if (stepIds.Count > 0)
-            {
-                var fieldsToRemove = await dbContext.Set<StepField>()
-                    .Where(x => stepIds.Contains(x.FlowStepId))
-                    .ToListAsync(cancellationToken);
-                dbContext.RemoveRange(fieldsToRemove);
-
-                var stepAssignmentsToRemove = await dbContext.Set<FlowStepUser>()
-                    .Where(x => stepIds.Contains(x.FlowStepId))
-                    .ToListAsync(cancellationToken);
-                dbContext.RemoveRange(stepAssignmentsToRemove);
-
-                var stepsToRemove = await dbContext.Set<FlowStep>()
-                    .Where(x => x.FlowDefinitionId == flow.Id)
-                    .ToListAsync(cancellationToken);
-                dbContext.RemoveRange(stepsToRemove);
-            }
-
-            var tokensToRemove = await dbContext.Set<FlowToken>()
-                .Where(x => x.FlowDefinitionId == flow.Id)
-                .ToListAsync(cancellationToken);
-            dbContext.RemoveRange(tokensToRemove);
-
-            var flowAssignmentsToRemove = await dbContext.Set<FlowDefinitionUser>()
-                .Where(x => x.FlowDefinitionId == flow.Id)
-                .ToListAsync(cancellationToken);
-            dbContext.RemoveRange(flowAssignmentsToRemove);
-
-            await db.SaveChangesAsync(cancellationToken);
-
+            await ClearFlowDefinitionChildrenAsync(dbContext, flow.Id, cancellationToken);
             dbContext.ChangeTracker.Clear();
 
             flow = await db.Flows.SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
                 ?? throw new AppNotFoundException("Fluxo nao encontrado.");
 
             Apply(flow, request);
+            MarkFlowDefinitionChildrenAsAdded(dbContext, flow);
             await db.SaveChangesAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
             await audit.WriteAsync("Flow", "UpdateDraft", "FlowDefinition", flow.Id, $"Rascunho '{flow.Name}' atualizado.", actorUserId, cancellationToken);
@@ -179,6 +131,96 @@ public sealed class FlowManagementService(
         catch (DbUpdateConcurrencyException ex)
         {
             throw new AppConflictException("O rascunho foi alterado por outra operacao durante o salvamento. Reabra o fluxo e tente salvar novamente.", ex);
+        }
+    }
+
+    private static async Task ClearFlowDefinitionChildrenAsync(DbContext dbContext, Guid flowId, CancellationToken cancellationToken)
+    {
+        var stepIds = await dbContext.Set<FlowStep>()
+            .AsNoTracking()
+            .Where(x => x.FlowDefinitionId == flowId)
+            .Select(x => x.Id)
+            .ToListAsync(cancellationToken);
+
+        if (stepIds.Count > 0)
+        {
+            var fieldIds = await dbContext.Set<StepField>()
+                .AsNoTracking()
+                .Where(x => stepIds.Contains(x.FlowStepId))
+                .Select(x => x.Id)
+                .ToListAsync(cancellationToken);
+
+            if (fieldIds.Count > 0)
+            {
+                dbContext.RemoveRange(await dbContext.Set<StepFieldOption>()
+                    .Where(x => fieldIds.Contains(x.StepFieldId))
+                    .ToListAsync(cancellationToken));
+                await dbContext.SaveChangesAsync(cancellationToken);
+                dbContext.ChangeTracker.Clear();
+            }
+
+            dbContext.RemoveRange(await dbContext.Set<StepField>()
+                .Where(x => stepIds.Contains(x.FlowStepId))
+                .ToListAsync(cancellationToken));
+            await dbContext.SaveChangesAsync(cancellationToken);
+            dbContext.ChangeTracker.Clear();
+
+            dbContext.RemoveRange(await dbContext.Set<FlowStepUser>()
+                .Where(x => stepIds.Contains(x.FlowStepId))
+                .ToListAsync(cancellationToken));
+            await dbContext.SaveChangesAsync(cancellationToken);
+            dbContext.ChangeTracker.Clear();
+
+            dbContext.RemoveRange(await dbContext.Set<FlowStep>()
+                .Where(x => x.FlowDefinitionId == flowId)
+                .ToListAsync(cancellationToken));
+            await dbContext.SaveChangesAsync(cancellationToken);
+            dbContext.ChangeTracker.Clear();
+        }
+
+        dbContext.RemoveRange(await dbContext.Set<FlowToken>()
+            .Where(x => x.FlowDefinitionId == flowId)
+            .ToListAsync(cancellationToken));
+        await dbContext.SaveChangesAsync(cancellationToken);
+        dbContext.ChangeTracker.Clear();
+
+        dbContext.RemoveRange(await dbContext.Set<FlowDefinitionUser>()
+            .Where(x => x.FlowDefinitionId == flowId)
+            .ToListAsync(cancellationToken));
+        await dbContext.SaveChangesAsync(cancellationToken);
+        dbContext.ChangeTracker.Clear();
+    }
+
+    private static void MarkFlowDefinitionChildrenAsAdded(DbContext dbContext, FlowDefinition flow)
+    {
+        foreach (var token in flow.Tokens)
+        {
+            dbContext.Entry(token).State = EntityState.Added;
+        }
+
+        foreach (var assignment in flow.AssignedUsers)
+        {
+            dbContext.Entry(assignment).State = EntityState.Added;
+        }
+
+        foreach (var step in flow.Steps)
+        {
+            dbContext.Entry(step).State = EntityState.Added;
+
+            foreach (var stepAssignment in step.AssignedUsers)
+            {
+                dbContext.Entry(stepAssignment).State = EntityState.Added;
+            }
+
+            foreach (var field in step.Fields)
+            {
+                dbContext.Entry(field).State = EntityState.Added;
+
+                foreach (var option in field.Options)
+                {
+                    dbContext.Entry(option).State = EntityState.Added;
+                }
+            }
         }
     }
 
