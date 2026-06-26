@@ -88,6 +88,31 @@ public sealed class FlowManagementService(
                 throw new AppConflictException("Somente versoes em rascunho podem ser alteradas. Gere um rascunho antes de editar.");
             }
 
+            var flowHasExecutions = await db.Instances.AnyAsync(x => x.FlowDefinitionId == flow.Id, cancellationToken);
+            if (flowHasExecutions)
+            {
+                var nextVersion = await db.Flows
+                    .Where(x => x.FlowKey == flow.FlowKey)
+                    .MaxAsync(x => x.VersionNumber, cancellationToken) + 1;
+
+                flow.Active = false;
+                flow.LifecycleStatus = FlowLifecycleStatus.Archived;
+
+                var replacementDraft = new FlowDefinition
+                {
+                    FlowKey = flow.FlowKey,
+                    VersionNumber = nextVersion,
+                    LifecycleStatus = FlowLifecycleStatus.Draft
+                };
+
+                Apply(replacementDraft, request);
+                db.Add(replacementDraft);
+                await db.SaveChangesAsync(cancellationToken);
+                await transaction.CommitAsync(cancellationToken);
+                await audit.WriteAsync("Flow", "UpdateDraft", "FlowDefinition", replacementDraft.Id, $"Novo rascunho v{replacementDraft.VersionNumber} criado para preservar execucoes anteriores de '{replacementDraft.Name}'.", actorUserId, cancellationToken);
+                return replacementDraft.Id;
+            }
+
             // Remove only the root children and let EF/database cascade delete the nested graph.
             db.RemoveRange(flow.Steps.ToList());
             db.RemoveRange(flow.Tokens.ToList());
