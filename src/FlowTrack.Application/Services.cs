@@ -86,6 +86,10 @@ public sealed class FlowManagementService(
         db.RemoveRange(flow.Steps.ToList());
         db.RemoveRange(flow.Tokens.ToList());
         db.RemoveRange(flow.AssignedUsers.ToList());
+        await db.SaveChangesAsync(cancellationToken);
+
+        flow = await LoadFlows().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
+            ?? throw new AppNotFoundException("Fluxo nao encontrado.");
 
         Apply(flow, request);
         await db.SaveChangesAsync(cancellationToken);
