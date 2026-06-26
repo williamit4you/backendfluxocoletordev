@@ -74,33 +74,40 @@ public sealed class FlowManagementService(
     {
         Validate(request);
 
-        var dbContext = db as DbContext
-            ?? throw new InvalidOperationException("O contexto de dados nao suporta operacoes transacionais para atualizar o fluxo.");
-        await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
-
-        var flow = await LoadFlows().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
-            ?? throw new AppNotFoundException("Fluxo nao encontrado.");
-
-        if (flow.LifecycleStatus != FlowLifecycleStatus.Draft)
+        try
         {
-            throw new AppConflictException("Somente versoes em rascunho podem ser alteradas. Gere um rascunho antes de editar.");
+            var dbContext = db as DbContext
+                ?? throw new InvalidOperationException("O contexto de dados nao suporta operacoes transacionais para atualizar o fluxo.");
+            await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+
+            var flow = await LoadFlows().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
+                ?? throw new AppNotFoundException("Fluxo nao encontrado.");
+
+            if (flow.LifecycleStatus != FlowLifecycleStatus.Draft)
+            {
+                throw new AppConflictException("Somente versoes em rascunho podem ser alteradas. Gere um rascunho antes de editar.");
+            }
+
+            // Remove only the root children and let EF/database cascade delete the nested graph.
+            db.RemoveRange(flow.Steps.ToList());
+            db.RemoveRange(flow.Tokens.ToList());
+            db.RemoveRange(flow.AssignedUsers.ToList());
+            await db.SaveChangesAsync(cancellationToken);
+            dbContext.ChangeTracker.Clear();
+
+            flow = await LoadFlows().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
+                ?? throw new AppNotFoundException("Fluxo nao encontrado.");
+
+            Apply(flow, request);
+            await db.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            await audit.WriteAsync("Flow", "UpdateDraft", "FlowDefinition", flow.Id, $"Rascunho '{flow.Name}' atualizado.", actorUserId, cancellationToken);
+            return flow.Id;
         }
-
-        // Remove only the root children and let EF/database cascade delete the nested graph.
-        db.RemoveRange(flow.Steps.ToList());
-        db.RemoveRange(flow.Tokens.ToList());
-        db.RemoveRange(flow.AssignedUsers.ToList());
-        await db.SaveChangesAsync(cancellationToken);
-        dbContext.ChangeTracker.Clear();
-
-        flow = await LoadFlows().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
-            ?? throw new AppNotFoundException("Fluxo nao encontrado.");
-
-        Apply(flow, request);
-        await db.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-        await audit.WriteAsync("Flow", "UpdateDraft", "FlowDefinition", flow.Id, $"Rascunho '{flow.Name}' atualizado.", actorUserId, cancellationToken);
-        return flow.Id;
+        catch (DbUpdateConcurrencyException ex)
+        {
+            throw new AppConflictException("O rascunho foi alterado por outra operacao durante o salvamento. Reabra o fluxo e tente salvar novamente.", ex);
+        }
     }
 
     public async Task<Guid> CreateDraftAsync(Guid id, Guid? actorUserId, CancellationToken cancellationToken)

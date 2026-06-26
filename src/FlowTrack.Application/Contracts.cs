@@ -141,7 +141,20 @@ public sealed class AppValidationException(Dictionary<string, string[]> errors) 
     public Dictionary<string, string[]> Errors { get; } = errors;
 }
 public sealed class AppNotFoundException(string message) : AppServiceException(message);
-public sealed class AppConflictException(string message) : AppServiceException(message);
+public sealed class AppConflictException : AppServiceException
+{
+    public AppConflictException(string message) : base(message)
+    {
+    }
+
+    public AppConflictException(string message, Exception? innerException) : base(message)
+    {
+        if (innerException is not null)
+        {
+            Data["InnerExceptionMessage"] = innerException.Message;
+        }
+    }
+}
 public sealed class AppForbiddenException(string message = "Operacao nao permitida.") : AppServiceException(message);
 
 public sealed class MappingProfile : Profile
