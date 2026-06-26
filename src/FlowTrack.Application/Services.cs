@@ -25,7 +25,9 @@ public sealed class FlowManagementService(
             return rows
                 .Where(x => x.Active)
                 .GroupBy(x => x.FlowKey)
-                .Select(group => FlowRuntimeSelectionHelper.SelectEffectiveVersion(group)!)
+                .Select(FlowRuntimeSelectionHelper.SelectEffectiveVersion)
+                .Where(flow => flow is not null)
+                .Select(flow => flow!)
                 .Select(flow => ToDto(flow))
                 .ToList();
         }
@@ -83,14 +85,14 @@ public sealed class FlowManagementService(
             var flow = await db.Flows.SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
                 ?? throw new AppNotFoundException("Fluxo nao encontrado.");
 
-            if (flow.LifecycleStatus != FlowLifecycleStatus.Draft)
-            {
-                throw new AppConflictException("Somente versoes em rascunho podem ser alteradas. Gere um rascunho antes de editar.");
-            }
-
             var flowHasExecutions = await db.Instances.AnyAsync(x => x.FlowDefinitionId == flow.Id, cancellationToken);
             if (flowHasExecutions)
             {
+                if (flow.LifecycleStatus != FlowLifecycleStatus.Draft)
+                {
+                    throw new AppConflictException("Esta versao ja possui execucoes. Crie um rascunho para gerar uma nova versao sem alterar o historico.");
+                }
+
                 var nextVersion = await db.Flows
                     .Where(x => x.FlowKey == flow.FlowKey)
                     .MaxAsync(x => x.VersionNumber, cancellationToken) + 1;
@@ -185,7 +187,16 @@ public sealed class FlowManagementService(
         var source = await LoadFlows().AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
             ?? throw new AppNotFoundException("Fluxo nao encontrado.");
 
-        var existingDraft = await LoadFlows().SingleOrDefaultAsync(x => x.FlowKey == source.FlowKey && x.LifecycleStatus == FlowLifecycleStatus.Draft, cancellationToken);
+        var existingDrafts = await LoadFlows()
+            .Where(x => x.FlowKey == source.FlowKey && x.LifecycleStatus == FlowLifecycleStatus.Draft)
+            .ToListAsync(cancellationToken);
+        var existingDraftIds = existingDrafts.Select(draft => draft.Id).ToList();
+        var draftIdsWithExecutions = await db.Instances
+            .Where(x => existingDraftIds.Contains(x.FlowDefinitionId))
+            .Select(x => x.FlowDefinitionId)
+            .Distinct()
+            .ToListAsync(cancellationToken);
+        var existingDraft = existingDrafts.FirstOrDefault(x => !draftIdsWithExecutions.Contains(x.Id));
         if (existingDraft is not null)
         {
             return existingDraft.Id;
@@ -950,7 +961,8 @@ public sealed class InstanceManagementService(
             .Where(x => x.FlowKey == requestedFlow.FlowKey && x.Active)
             .ToListAsync(cancellationToken);
 
-        var flow = FlowRuntimeSelectionHelper.SelectEffectiveVersion(relatedVersions) ?? requestedFlow;
+        var flow = FlowRuntimeSelectionHelper.SelectEffectiveVersion(relatedVersions)
+            ?? throw new AppConflictException("Nenhuma versao publicada deste fluxo esta disponivel para novas execucoes.");
 
         if (!HasFlowAccess(flow, actorUserId))
         {
@@ -1583,8 +1595,8 @@ public static class FlowRuntimeSelectionHelper
     public static FlowDefinition? SelectEffectiveVersion(IEnumerable<FlowDefinition> versions)
     {
         return versions
-            .OrderByDescending(x => x.LifecycleStatus == FlowLifecycleStatus.Draft)
-            .ThenByDescending(x => x.VersionNumber)
+            .Where(x => x.LifecycleStatus == FlowLifecycleStatus.Published)
+            .OrderByDescending(x => x.VersionNumber)
             .FirstOrDefault();
     }
 }

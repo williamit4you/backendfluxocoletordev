@@ -39,6 +39,10 @@ public sealed class InstancesController(IInstanceManagementService instances) : 
         {
             return NotFound();
         }
+        catch (AppConflictException ex)
+        {
+            return Conflict(new { message = ex.Message });
+        }
         catch (AppForbiddenException)
         {
             return Forbid();
