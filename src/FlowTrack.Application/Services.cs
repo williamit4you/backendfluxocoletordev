@@ -74,6 +74,10 @@ public sealed class FlowManagementService(
     {
         Validate(request);
 
+        var dbContext = db as DbContext
+            ?? throw new InvalidOperationException("O contexto de dados nao suporta operacoes transacionais para atualizar o fluxo.");
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+
         var flow = await LoadFlows().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
             ?? throw new AppNotFoundException("Fluxo nao encontrado.");
 
@@ -87,12 +91,14 @@ public sealed class FlowManagementService(
         db.RemoveRange(flow.Tokens.ToList());
         db.RemoveRange(flow.AssignedUsers.ToList());
         await db.SaveChangesAsync(cancellationToken);
+        dbContext.ChangeTracker.Clear();
 
         flow = await LoadFlows().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
             ?? throw new AppNotFoundException("Fluxo nao encontrado.");
 
         Apply(flow, request);
         await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
         await audit.WriteAsync("Flow", "UpdateDraft", "FlowDefinition", flow.Id, $"Rascunho '{flow.Name}' atualizado.", actorUserId, cancellationToken);
         return flow.Id;
     }
