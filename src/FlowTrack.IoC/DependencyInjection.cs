@@ -128,6 +128,7 @@ internal sealed class IntegrationExecutionService(
 
         using var request = new HttpRequestMessage(new HttpMethod(method), resolvedUrl);
         ApplyToken(flow, config, request);
+        ApplyHeaders(config, data, request);
 
         if (step.Type == StepType.ApiSend)
         {
@@ -228,6 +229,11 @@ internal sealed class IntegrationExecutionService(
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
+        if (!string.IsNullOrWhiteSpace(config.BodyTemplate))
+        {
+            return BuildApiSendPayloadFromTemplate(config.BodyTemplate, data);
+        }
+
         if (config.BodyMappings is not null && config.BodyMappings.Count > 0)
         {
             return BuildCustomApiSendPayload(config.BodyMappings, data);
@@ -241,6 +247,46 @@ internal sealed class IntegrationExecutionService(
         return data
             .Where(entry => selectedKeys.Contains(entry.Key, StringComparer.OrdinalIgnoreCase))
             .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static Dictionary<string, JsonElement> BuildApiSendPayloadFromTemplate(string bodyTemplate, Dictionary<string, JsonElement> data)
+    {
+        var resolvedTemplate = ResolveBodyTemplate(bodyTemplate, data);
+
+        using var document = JsonDocument.Parse(resolvedTemplate);
+        if (document.RootElement.ValueKind != JsonValueKind.Object)
+        {
+            throw new InvalidOperationException("O body customizado precisa ser um JSON com objeto na raiz.");
+        }
+
+        return document.RootElement
+            .EnumerateObject()
+            .ToDictionary(property => property.Name, property => property.Value.Clone(), StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static string ResolveBodyTemplate(string template, Dictionary<string, JsonElement> data)
+    {
+        var resolved = template;
+
+        foreach (var entry in data)
+        {
+            var exactPatterns = new[]
+            {
+                $"\"{{{{{entry.Key}}}}}\"",
+                $"\"{{{{steps.current.fields.{entry.Key}}}}}\""
+            };
+
+            foreach (var pattern in exactPatterns)
+            {
+                resolved = resolved.Replace(pattern, entry.Value.GetRawText(), StringComparison.OrdinalIgnoreCase);
+            }
+
+            var escapedText = JsonSerializer.Serialize(entry.Value.ToString())[1..^1];
+            resolved = resolved.Replace($"{{{{{entry.Key}}}}}", escapedText, StringComparison.OrdinalIgnoreCase);
+            resolved = resolved.Replace($"{{{{steps.current.fields.{entry.Key}}}}}", escapedText, StringComparison.OrdinalIgnoreCase);
+        }
+
+        return resolved;
     }
 
     private static Dictionary<string, JsonElement> BuildCustomApiSendPayload(IReadOnlyList<BodyFieldMappingDto> mappings, Dictionary<string, JsonElement> data)
@@ -398,6 +444,33 @@ internal sealed class IntegrationExecutionService(
 
         var header = string.IsNullOrWhiteSpace(token.HeaderName) ? "X-API-Key" : token.HeaderName;
         request.Headers.TryAddWithoutValidation(header, plainValue);
+    }
+
+    private static void ApplyHeaders(StepApiConfigDto config, Dictionary<string, JsonElement> data, HttpRequestMessage request)
+    {
+        if (config.Headers is null || config.Headers.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var header in config.Headers)
+        {
+            if (string.IsNullOrWhiteSpace(header.Name) || string.IsNullOrWhiteSpace(header.Value))
+            {
+                continue;
+            }
+
+            var headerName = header.Name.Trim();
+            var headerValue = ResolveTemplate(header.Value.Trim(), data);
+
+            if (string.Equals(headerName, "Content-Type", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            request.Headers.Remove(headerName);
+            request.Headers.TryAddWithoutValidation(headerName, headerValue);
+        }
     }
 
     private async Task<string?> ValidateDestinationAsync(string url, IConfiguration configuration, CancellationToken cancellationToken)

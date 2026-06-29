@@ -17,8 +17,9 @@ public record MinioConfigurationDto(Guid? Id, string Endpoint, string AccessKey,
 public record SaveMinioConfigurationRequest(string Endpoint, string AccessKey, string SecretKey, string PublicUrl, bool Active, IReadOnlyList<MinioBucketDto> Buckets);
 public record ResponseFieldMappingDto(string FieldKey, string ResponsePath);
 public record BodyFieldMappingDto(string TargetKey, string SourceReference);
+public record RequestHeaderDto(string Name, string Value);
 public record StepScheduleAssistDto(int? IntervalMinutes = null, string? CronExpression = null, string? HelperText = null);
-public record StepApiConfigDto(string? Url, string? Method, string? TokenName, string? ScheduleMode, string? ScheduleValue, string? QueryTemplate, bool ValidateTls, IReadOnlyList<string>? SendFieldKeys = null, IReadOnlyList<ResponseFieldMappingDto>? ResponseMappings = null, IReadOnlyList<BodyFieldMappingDto>? BodyMappings = null, StepScheduleAssistDto? ScheduleAssist = null);
+public record StepApiConfigDto(string? Url, string? Method, string? TokenName, string? ScheduleMode, string? ScheduleValue, string? QueryTemplate, bool ValidateTls, IReadOnlyList<string>? SendFieldKeys = null, IReadOnlyList<ResponseFieldMappingDto>? ResponseMappings = null, IReadOnlyList<BodyFieldMappingDto>? BodyMappings = null, StepScheduleAssistDto? ScheduleAssist = null, IReadOnlyList<RequestHeaderDto>? Headers = null, string? BodyTemplate = null);
 public record StepDto(Guid? Id, string Name, string? Description, StepType Type, int Order, IReadOnlyList<Guid> AssignedUserIds, IReadOnlyList<FieldDto> Fields, StepApiConfigDto? ApiConfig);
 public record FlowDto(Guid Id, Guid FlowKey, string Name, string Description, bool Active, int VersionNumber, string LifecycleStatus, DateTime? PublishedAt, bool HasDraft, IReadOnlyList<FlowTokenDto> Tokens, IReadOnlyList<Guid> AssignedUserIds, IReadOnlyList<StepDto> Steps);
 public record SaveFlowRequest(string Name, string Description, bool Active, IReadOnlyList<FlowTokenDto> Tokens, IReadOnlyList<Guid> AssignedUserIds, IReadOnlyList<StepDto> Steps);

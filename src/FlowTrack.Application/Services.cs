@@ -491,7 +491,9 @@ public sealed class FlowManagementService(
             SendFieldKeys = config.SendFieldKeys?.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
             ResponseMappings = config.ResponseMappings?.Where(x => !string.IsNullOrWhiteSpace(x.FieldKey) && !string.IsNullOrWhiteSpace(x.ResponsePath)).Select(x => new ResponseFieldMappingDto(x.FieldKey.Trim(), x.ResponsePath.Trim())).ToList(),
             BodyMappings = config.BodyMappings?.Where(x => !string.IsNullOrWhiteSpace(x.TargetKey) && !string.IsNullOrWhiteSpace(x.SourceReference)).Select(x => new BodyFieldMappingDto(x.TargetKey.Trim(), x.SourceReference.Trim())).ToList(),
-            ScheduleAssist = assist
+            ScheduleAssist = assist,
+            Headers = config.Headers?.Where(x => !string.IsNullOrWhiteSpace(x.Name) && !string.IsNullOrWhiteSpace(x.Value)).Select(x => new RequestHeaderDto(x.Name.Trim(), x.Value.Trim())).ToList(),
+            BodyTemplate = string.IsNullOrWhiteSpace(config.BodyTemplate) ? null : config.BodyTemplate.Trim()
         };
     }
 
