@@ -971,13 +971,14 @@ internal sealed class ApiQueryWorker(
 
     private static bool IsDue(StepApiConfigDto config, AppDbContext db, Guid instanceId, Guid stepId, DateTime? stepStartedAtUtc, TimeZoneInfo timeZone)
     {
-        var lastAttempt = db.IntegrationAttempts
+        var lastAttemptAt = db.IntegrationAttempts
             .AsNoTracking()
             .Where(x => x.FlowInstanceId == instanceId && x.FlowStepId == stepId && x.TriggerType == IntegrationTriggerType.Runtime)
             .OrderByDescending(x => x.CreatedAt)
+            .Select(x => (DateTime?)x.CreatedAt)
             .FirstOrDefault();
-        var reference = lastAttempt?.CreatedAt ?? stepStartedAtUtc ?? DateTime.UtcNow;
-        return ScheduleRuntimeHelper.IsDue(config, lastAttempt?.CreatedAt, reference, DateTime.UtcNow, timeZone: timeZone);
+        var reference = lastAttemptAt ?? stepStartedAtUtc ?? DateTime.UtcNow;
+        return ScheduleRuntimeHelper.IsDue(config, lastAttemptAt, reference, DateTime.UtcNow, timeZone: timeZone);
     }
 }
 
