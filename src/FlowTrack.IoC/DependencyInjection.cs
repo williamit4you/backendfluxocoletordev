@@ -21,6 +21,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Npgsql;
 
 namespace FlowTrack.IoC;
 
@@ -638,6 +639,7 @@ internal sealed class IntegrationExecutionService(
         StepExecution? stepExecution,
         CancellationToken cancellationToken)
     {
+        var createdAt = DateTime.UtcNow;
         var attempt = new IntegrationAttempt
         {
             FlowInstanceId = instance?.Id,
@@ -649,14 +651,29 @@ internal sealed class IntegrationExecutionService(
             Success = success,
             ResponseStatusCode = statusCode,
             DurationMs = durationMs,
+            CreatedAt = createdAt,
             RequestHeaders = Truncate(requestHeaders, 3900),
             RequestBody = Truncate(requestBody, 5900),
             ResponsePreview = Truncate(preview),
             ErrorMessage = string.IsNullOrWhiteSpace(error) ? null : Truncate(error, 900)
         };
 
-        db.IntegrationAttempts.Add(attempt);
-        await db.SaveChangesAsync(cancellationToken);
+        try
+        {
+            db.IntegrationAttempts.Add(attempt);
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException ex) when (ex.InnerException is PostgresException postgres && postgres.SqlState == PostgresErrorCodes.UndefinedColumn)
+        {
+            db.Entry(attempt).State = EntityState.Detached;
+
+            await db.Database.ExecuteSqlInterpolatedAsync($@"
+                INSERT INTO ""IntegrationAttempts""
+                (""Id"", ""FlowInstanceId"", ""FlowStepId"", ""StepExecutionId"", ""TriggerType"", ""Method"", ""Url"", ""ResponseStatusCode"", ""Success"", ""DurationMs"", ""CreatedAt"", ""ResponsePreview"", ""ErrorMessage"")
+                VALUES
+                ({attempt.Id}, {attempt.FlowInstanceId}, {attempt.FlowStepId}, {attempt.StepExecutionId}, {(int)attempt.TriggerType}, {attempt.Method}, {attempt.Url}, {attempt.ResponseStatusCode}, {attempt.Success}, {attempt.DurationMs}, {attempt.CreatedAt}, {attempt.ResponsePreview}, {attempt.ErrorMessage})
+            ", cancellationToken);
+        }
 
         return new IntegrationExecutionResult(success, statusCode, durationMs, attempt.Url, method, attempt.RequestHeaders, attempt.RequestBody, attempt.ResponsePreview, attempt.ErrorMessage, mappedData);
     }
