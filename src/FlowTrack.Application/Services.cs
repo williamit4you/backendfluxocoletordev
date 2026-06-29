@@ -916,7 +916,6 @@ public sealed class InstanceManagementService(
                     .ThenInclude(x => x.AssignedUsers)
             .Include(x => x.StepExecutions)
                 .ThenInclude(x => x.FlowStep)
-            .Include(x => x.IntegrationAttempts)
             .AsQueryable();
 
         if (flowId.HasValue)
