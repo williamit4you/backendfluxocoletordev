@@ -1272,7 +1272,6 @@ public sealed class InstanceManagementService(
                 .ThenInclude(x => x.Steps)
                     .ThenInclude(x => x.Fields)
                         .ThenInclude(x => x.Options)
-            .Include(x => x.IntegrationAttempts)
             .Include(x => x.StepExecutions)
                 .ThenInclude(x => x.FlowStep)
                     .ThenInclude(x => x.AssignedUsers)
@@ -1555,6 +1554,7 @@ public sealed class InstanceManagementService(
                 .Where(x => stepExecutionIds.Contains(x.StepExecutionId))
                 .OrderBy(x => x.UploadedAt)
                 .ToListAsync(cancellationToken);
+        var integrationAttemptsByStep = await LoadIntegrationAttemptsByStepAsync(item.Id, cancellationToken);
 
         var storedFileDtos = new Dictionary<Guid, List<UploadedFileDto>>();
         foreach (var file in storedFiles)
@@ -1624,13 +1624,52 @@ public sealed class InstanceManagementService(
                                     ? string.Join(", ", (storedFileDtos.TryGetValue(x.Id, out var uploadFiles) ? uploadFiles.Where(file => string.Equals(file.FieldKey, f.Key, StringComparison.OrdinalIgnoreCase)).Select(file => file.FileName) : Enumerable.Empty<string>()).ToArray())
                                     : rawData.TryGetValue(f.Key, out var fieldValue) ? fieldValue.ToString() : null))
                             .ToList(),
-                        item.IntegrationAttempts
-                            .Where(a => a.FlowStepId == x.FlowStepId)
-                            .OrderByDescending(a => a.CreatedAt)
-                            .Select(a => new IntegrationAttemptDto(a.Id, a.TriggerType.ToString(), a.Method, a.Url, a.ResponseStatusCode, a.Success, a.DurationMs, a.CreatedAt, a.RequestHeaders, a.RequestBody, a.ResponsePreview, a.ErrorMessage))
-                            .ToList());
+                        integrationAttemptsByStep.TryGetValue(x.FlowStepId, out var attempts) ? attempts : []);
                 })
                 .ToList());
+    }
+
+    private async Task<Dictionary<Guid, IReadOnlyList<IntegrationAttemptDto>>> LoadIntegrationAttemptsByStepAsync(Guid instanceId, CancellationToken cancellationToken)
+    {
+        var attempts = await db.IntegrationAttempts
+            .AsNoTracking()
+            .Where(x => x.FlowInstanceId == instanceId)
+            .OrderByDescending(x => x.CreatedAt)
+            .Select(x => new
+            {
+                x.Id,
+                x.FlowStepId,
+                x.TriggerType,
+                x.Method,
+                x.Url,
+                x.ResponseStatusCode,
+                x.Success,
+                x.DurationMs,
+                x.CreatedAt,
+                x.ResponsePreview,
+                x.ErrorMessage
+            })
+            .ToListAsync(cancellationToken);
+
+        return attempts
+            .GroupBy(x => x.FlowStepId)
+            .ToDictionary(
+                group => group.Key,
+                group => (IReadOnlyList<IntegrationAttemptDto>)group
+                    .Select(x => new IntegrationAttemptDto(
+                        x.Id,
+                        x.TriggerType.ToString(),
+                        x.Method,
+                        x.Url,
+                        x.ResponseStatusCode,
+                        x.Success,
+                        x.DurationMs,
+                        x.CreatedAt,
+                        null,
+                        null,
+                        x.ResponsePreview,
+                        x.ErrorMessage))
+                    .ToList());
     }
 }
 
