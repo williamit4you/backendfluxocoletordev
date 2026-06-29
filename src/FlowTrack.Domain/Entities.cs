@@ -135,6 +135,8 @@ public sealed class IntegrationAttempt : Entity
     public bool Success { get; set; }
     public int DurationMs { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public string? RequestHeaders { get; set; }
+    public string? RequestBody { get; set; }
     public string? ResponsePreview { get; set; }
     public string? ErrorMessage { get; set; }
 }

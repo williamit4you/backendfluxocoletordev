@@ -283,6 +283,12 @@ namespace FlowTrack.Data.Migrations
                         .HasMaxLength(10)
                         .HasColumnType("character varying(10)");
 
+                    b.Property<string>("RequestBody")
+                        .HasColumnType("text");
+
+                    b.Property<string>("RequestHeaders")
+                        .HasColumnType("text");
+
                     b.Property<string>("ResponsePreview")
                         .HasMaxLength(2000)
                         .HasColumnType("character varying(2000)");

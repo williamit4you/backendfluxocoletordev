@@ -1627,7 +1627,7 @@ public sealed class InstanceManagementService(
                         item.IntegrationAttempts
                             .Where(a => a.FlowStepId == x.FlowStepId)
                             .OrderByDescending(a => a.CreatedAt)
-                            .Select(a => new IntegrationAttemptDto(a.Id, a.TriggerType.ToString(), a.Method, a.Url, a.ResponseStatusCode, a.Success, a.DurationMs, a.CreatedAt, a.ResponsePreview, a.ErrorMessage))
+                            .Select(a => new IntegrationAttemptDto(a.Id, a.TriggerType.ToString(), a.Method, a.Url, a.ResponseStatusCode, a.Success, a.DurationMs, a.CreatedAt, a.RequestHeaders, a.RequestBody, a.ResponsePreview, a.ErrorMessage))
                             .ToList());
                 })
                 .ToList());

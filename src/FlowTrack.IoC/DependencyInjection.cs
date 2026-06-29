@@ -109,7 +109,7 @@ internal sealed class IntegrationExecutionService(
 
         if (config is null || string.IsNullOrWhiteSpace(config.Url))
         {
-            return await SaveAttemptAsync(step, triggerType, "GET", "", false, null, 0, null, "Etapa sem configuracao de integracao.", null, instance, stepExecution, cancellationToken);
+            return await SaveAttemptAsync(step, triggerType, "GET", "", false, null, 0, null, null, null, "Etapa sem configuracao de integracao.", null, instance, stepExecution, cancellationToken);
         }
 
         var method = ResolveMethod(step.Type, config.Method);
@@ -123,17 +123,22 @@ internal sealed class IntegrationExecutionService(
         if (validationError is not null)
         {
             logger.LogWarning("Destino de integracao bloqueado para a etapa {StepId}: {Error}", step.Id, validationError);
-            return await SaveAttemptAsync(step, triggerType, method, SanitizeUrl(resolvedUrl), false, null, 0, null, validationError, null, instance, stepExecution, cancellationToken);
+            return await SaveAttemptAsync(step, triggerType, method, SanitizeUrl(resolvedUrl), false, null, 0, null, null, null, validationError, null, instance, stepExecution, cancellationToken);
         }
 
         using var request = new HttpRequestMessage(new HttpMethod(method), resolvedUrl);
         ApplyToken(flow, config, request);
         ApplyHeaders(config, data, request);
+        Dictionary<string, JsonElement>? apiSendPayload = null;
 
         if (step.Type == StepType.ApiSend)
         {
-            request.Content = JsonContent.Create(BuildApiSendPayload(config, data));
+            apiSendPayload = BuildApiSendPayload(config, data);
+            request.Content = JsonContent.Create(apiSendPayload);
         }
+
+        var requestHeadersPreview = BuildRequestHeadersPreview(request);
+        var requestBodyPreview = BuildRequestBodyPreview(apiSendPayload);
 
         var watch = Stopwatch.StartNew();
 
@@ -157,6 +162,8 @@ internal sealed class IntegrationExecutionService(
                 success,
                 (int)response.StatusCode,
                 (int)watch.ElapsedMilliseconds,
+                requestHeadersPreview,
+                requestBodyPreview,
                 preview,
                 success ? null : $"Resposta HTTP {(int)response.StatusCode}.",
                 mappedData,
@@ -175,6 +182,8 @@ internal sealed class IntegrationExecutionService(
                 false,
                 null,
                 (int)watch.ElapsedMilliseconds,
+                requestHeadersPreview,
+                requestBodyPreview,
                 null,
                 Truncate(ex.Message, 400),
                 null,
@@ -393,6 +402,56 @@ internal sealed class IntegrationExecutionService(
         return mapped.Count == 0 ? null : mapped;
     }
 
+    private static string? BuildRequestHeadersPreview(HttpRequestMessage request)
+    {
+        var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var header in request.Headers)
+        {
+            headers[header.Key] = MaskHeaderValue(header.Key, string.Join(", ", header.Value));
+        }
+
+        if (request.Content is not null)
+        {
+            foreach (var header in request.Content.Headers)
+            {
+                headers[header.Key] = MaskHeaderValue(header.Key, string.Join(", ", header.Value));
+            }
+        }
+
+        return headers.Count == 0 ? null : Truncate(JsonSerializer.Serialize(headers, new JsonSerializerOptions { WriteIndented = true }), 4000);
+    }
+
+    private static string? BuildRequestBodyPreview(Dictionary<string, JsonElement>? payload)
+    {
+        return payload is null || payload.Count == 0
+            ? null
+            : Truncate(JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true }), 6000);
+    }
+
+    private static string MaskHeaderValue(string headerName, string value)
+    {
+        var normalized = headerName.Trim().ToLowerInvariant();
+        var isSensitive = normalized.Contains("authorization")
+            || normalized.Contains("token")
+            || normalized.Contains("api-key")
+            || normalized.Contains("apikey")
+            || normalized.Contains("secret")
+            || normalized.Contains("cookie");
+
+        if (!isSensitive || string.IsNullOrWhiteSpace(value))
+        {
+            return value;
+        }
+
+        if (value.Length <= 8)
+        {
+            return "***";
+        }
+
+        return $"{value[..4]}***{value[^4..]}";
+    }
+
     private static bool TryResolveJsonPath(JsonElement root, string path, out JsonElement value)
     {
         value = root;
@@ -570,6 +629,8 @@ internal sealed class IntegrationExecutionService(
         bool success,
         int? statusCode,
         int durationMs,
+        string? requestHeaders,
+        string? requestBody,
         string? preview,
         string? error,
         Dictionary<string, JsonElement>? mappedData,
@@ -588,6 +649,8 @@ internal sealed class IntegrationExecutionService(
             Success = success,
             ResponseStatusCode = statusCode,
             DurationMs = durationMs,
+            RequestHeaders = Truncate(requestHeaders, 3900),
+            RequestBody = Truncate(requestBody, 5900),
             ResponsePreview = Truncate(preview),
             ErrorMessage = string.IsNullOrWhiteSpace(error) ? null : Truncate(error, 900)
         };
@@ -595,7 +658,7 @@ internal sealed class IntegrationExecutionService(
         db.IntegrationAttempts.Add(attempt);
         await db.SaveChangesAsync(cancellationToken);
 
-        return new IntegrationExecutionResult(success, statusCode, durationMs, attempt.Url, method, attempt.ResponsePreview, attempt.ErrorMessage, mappedData);
+        return new IntegrationExecutionResult(success, statusCode, durationMs, attempt.Url, method, attempt.RequestHeaders, attempt.RequestBody, attempt.ResponsePreview, attempt.ErrorMessage, mappedData);
     }
 }
 
@@ -814,6 +877,16 @@ internal sealed class InstanceAutomationService(
         if (result.StatusCode.HasValue)
         {
             currentData["_integration.statusCode"] = JsonSerializer.SerializeToElement(result.StatusCode.Value);
+        }
+
+        if (!string.IsNullOrWhiteSpace(result.RequestHeaders))
+        {
+            currentData["_integration.requestHeaders"] = JsonSerializer.SerializeToElement(result.RequestHeaders);
+        }
+
+        if (!string.IsNullOrWhiteSpace(result.RequestBody))
+        {
+            currentData["_integration.requestBody"] = JsonSerializer.SerializeToElement(result.RequestBody);
         }
 
         if (!string.IsNullOrWhiteSpace(result.ResponsePreview))
