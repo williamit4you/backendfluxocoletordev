@@ -18,6 +18,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Net.Sockets;
 using System.Security.Cryptography;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -95,6 +96,12 @@ internal sealed class IntegrationExecutionService(
     IConfiguration appConfig,
     ILogger<IntegrationExecutionService> logger) : IIntegrationExecutionService
 {
+    private static readonly JsonSerializerOptions RelaxedJsonOptions = new()
+    {
+        WriteIndented = true,
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
+
     public async Task<IntegrationExecutionResult> ExecuteAsync(
         FlowDefinition flow,
         FlowStep step,
@@ -135,7 +142,7 @@ internal sealed class IntegrationExecutionService(
         if (step.Type == StepType.ApiSend)
         {
             apiSendPayload = BuildApiSendPayload(config, data);
-            request.Content = JsonContent.Create(apiSendPayload);
+            request.Content = JsonContent.Create(apiSendPayload, options: RelaxedJsonOptions);
         }
 
         var requestHeadersPreview = BuildRequestHeadersPreview(request);
@@ -211,14 +218,7 @@ internal sealed class IntegrationExecutionService(
 
     private static string ResolveTemplate(string template, Dictionary<string, JsonElement> data)
     {
-        var result = template;
-        foreach (var entry in data)
-        {
-            result = result.Replace($"{{{{{entry.Key}}}}}", entry.Value.ToString(), StringComparison.OrdinalIgnoreCase);
-            result = result.Replace($"{{{{steps.current.fields.{entry.Key}}}}}", entry.Value.ToString(), StringComparison.OrdinalIgnoreCase);
-        }
-
-        return result;
+        return ResolveTemplateText(template, data);
     }
 
     private static string Truncate(string? value, int max = 1200)
@@ -276,27 +276,21 @@ internal sealed class IntegrationExecutionService(
 
     private static string ResolveBodyTemplate(string template, Dictionary<string, JsonElement> data)
     {
-        var resolved = template;
+        var normalizedTemplate = NormalizeTemplateText(template);
 
-        foreach (var entry in data)
-        {
-            var exactPatterns = new[]
+        normalizedTemplate = Regex.Replace(
+            normalizedTemplate,
+            "\"\\{\\{(?<key>[^}]+)\\}\\}\"",
+            match =>
             {
-                $"\"{{{{{entry.Key}}}}}\"",
-                $"\"{{{{steps.current.fields.{entry.Key}}}}}\""
-            };
+                var key = match.Groups["key"].Value.Trim();
+                return TryResolveTemplateValue(key, data, out var value)
+                    ? value.GetRawText()
+                    : match.Value;
+            },
+            RegexOptions.IgnoreCase);
 
-            foreach (var pattern in exactPatterns)
-            {
-                resolved = resolved.Replace(pattern, entry.Value.GetRawText(), StringComparison.OrdinalIgnoreCase);
-            }
-
-            var escapedText = JsonSerializer.Serialize(entry.Value.ToString())[1..^1];
-            resolved = resolved.Replace($"{{{{{entry.Key}}}}}", escapedText, StringComparison.OrdinalIgnoreCase);
-            resolved = resolved.Replace($"{{{{steps.current.fields.{entry.Key}}}}}", escapedText, StringComparison.OrdinalIgnoreCase);
-        }
-
-        return resolved;
+        return ResolveTemplateText(normalizedTemplate, data);
     }
 
     private static Dictionary<string, JsonElement> BuildCustomApiSendPayload(IReadOnlyList<BodyFieldMappingDto> mappings, Dictionary<string, JsonElement> data)
@@ -360,7 +354,7 @@ internal sealed class IntegrationExecutionService(
         if (exactMatch.Success)
         {
             var key = exactMatch.Groups["key"].Value.Trim();
-            if (data.TryGetValue(key, out var jsonValue))
+            if (TryResolveTemplateValue(key, data, out var jsonValue))
             {
                 return jsonValue;
             }
@@ -368,13 +362,7 @@ internal sealed class IntegrationExecutionService(
             return JsonSerializer.SerializeToElement(string.Empty);
         }
 
-        var resolvedText = sourceReference;
-        foreach (var entry in data)
-        {
-            resolvedText = resolvedText.Replace($"{{{{{entry.Key}}}}}", entry.Value.ToString(), StringComparison.OrdinalIgnoreCase);
-        }
-
-        return JsonSerializer.SerializeToElement(resolvedText);
+        return JsonSerializer.SerializeToElement(ResolveTemplateText(sourceReference, data));
     }
 
     private static Dictionary<string, JsonElement>? MapResponseData(StepApiConfigDto config, string responseText)
@@ -420,14 +408,89 @@ internal sealed class IntegrationExecutionService(
             }
         }
 
-        return headers.Count == 0 ? null : Truncate(JsonSerializer.Serialize(headers, new JsonSerializerOptions { WriteIndented = true }), 4000);
+        return headers.Count == 0 ? null : Truncate(JsonSerializer.Serialize(headers, RelaxedJsonOptions), 4000);
     }
 
     private static string? BuildRequestBodyPreview(Dictionary<string, JsonElement>? payload)
     {
         return payload is null || payload.Count == 0
             ? null
-            : Truncate(JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true }), 6000);
+            : Truncate(JsonSerializer.Serialize(payload, RelaxedJsonOptions), 6000);
+    }
+
+    private static string ResolveTemplateText(string template, Dictionary<string, JsonElement> data)
+    {
+        return Regex.Replace(
+            NormalizeTemplateText(template),
+            @"\{\{(?<key>[^}]+)\}\}",
+            match =>
+            {
+                var key = match.Groups["key"].Value.Trim();
+                return TryResolveTemplateValue(key, data, out var value)
+                    ? value.ToString()
+                    : match.Value;
+            },
+            RegexOptions.IgnoreCase);
+    }
+
+    private static bool TryResolveTemplateValue(string key, Dictionary<string, JsonElement> data, out JsonElement value)
+    {
+        if (data.TryGetValue(key, out value))
+        {
+            return true;
+        }
+
+        var normalizedKey = NormalizeLookupKey(key);
+        foreach (var entry in data)
+        {
+            if (NormalizeLookupKey(entry.Key) == normalizedKey)
+            {
+                value = entry.Value;
+                return true;
+            }
+        }
+
+        foreach (var alias in ExpandLookupAliases(normalizedKey))
+        {
+            foreach (var entry in data)
+            {
+                if (NormalizeLookupKey(entry.Key) == alias)
+                {
+                    value = entry.Value;
+                    return true;
+                }
+            }
+        }
+
+        value = default;
+        return false;
+    }
+
+    private static string NormalizeLookupKey(string value)
+    {
+        return Regex.Replace(value.Trim().ToLowerInvariant(), @"[^a-z0-9]+", string.Empty);
+    }
+
+    private static IEnumerable<string> ExpandLookupAliases(string normalizedKey)
+    {
+        yield return normalizedKey;
+
+        if (normalizedKey is "cpfcnpjentidade" or "cpfcnpj" or "cnpjcpf" or "documento" or "documentoentidade")
+        {
+            yield return "cnpj";
+            yield return "cpf";
+            yield return "cpfcnpj";
+            yield return "cpfcnpjentidade";
+        }
+    }
+
+    private static string NormalizeTemplateText(string value)
+    {
+        return value
+            .Replace('\u2018', '\'')
+            .Replace('\u2019', '\'')
+            .Replace('\u201C', '"')
+            .Replace('\u201D', '"');
     }
 
     private static string MaskHeaderValue(string headerName, string value)
