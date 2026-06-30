@@ -474,6 +474,7 @@ internal sealed class IntegrationExecutionService(
 
         var targetPath = string.IsNullOrWhiteSpace(rule.TargetPath) ? "$" : rule.TargetPath.Trim();
         var expectedType = NormalizeExpectedType(rule.ExpectedType);
+        var mode = NormalizeRuleMode(rule.Mode);
         var emptyBehavior = NormalizeRuleBehavior(rule.EmptyBehavior, "advance");
         var nonEmptyBehavior = NormalizeRuleBehavior(rule.NonEmptyBehavior, "advance");
         var failureBehavior = NormalizeRuleBehavior(rule.FailureBehavior, "fail");
@@ -484,6 +485,11 @@ internal sealed class IntegrationExecutionService(
             if (!TryResolveResponseRulePath(document.RootElement, targetPath, out var selected))
             {
                 return BuildRuleFailure(rule, targetPath, expectedType, attemptCount, $"Caminho '{targetPath}' nao encontrado na resposta.", failureBehavior, nowUtc);
+            }
+
+            if (mode == "condition")
+            {
+                return EvaluateConditionResponseRule(rule, selected, targetPath, expectedType, attemptCount, nowUtc);
             }
 
             var isEmpty = IsResponseValueEmpty(selected, expectedType);
@@ -500,7 +506,8 @@ internal sealed class IntegrationExecutionService(
                     isEmpty,
                     attemptCount,
                     rule.MaxAttempts,
-                    rule.RetryIntervalMinutes);
+                    rule.RetryIntervalMinutes,
+                    Mode: mode);
             }
 
             if (action == "retry")
@@ -517,7 +524,8 @@ internal sealed class IntegrationExecutionService(
                     attemptCount,
                     rule.MaxAttempts,
                     retryMinutes,
-                    nowUtc.AddMinutes(retryMinutes));
+                    nowUtc.AddMinutes(retryMinutes),
+                    Mode: mode);
             }
 
             if (action == "fail")
@@ -532,7 +540,8 @@ internal sealed class IntegrationExecutionService(
                     isEmpty,
                     attemptCount,
                     rule.MaxAttempts,
-                    rule.RetryIntervalMinutes);
+                    rule.RetryIntervalMinutes,
+                    Mode: mode);
             }
 
             return new ResponseRuleEvaluationDto(
@@ -545,7 +554,8 @@ internal sealed class IntegrationExecutionService(
                 isEmpty,
                 attemptCount,
                 rule.MaxAttempts,
-                rule.RetryIntervalMinutes);
+                rule.RetryIntervalMinutes,
+                Mode: mode);
         }
         catch (JsonException)
         {
@@ -553,20 +563,113 @@ internal sealed class IntegrationExecutionService(
         }
     }
 
+    private static ResponseRuleEvaluationDto EvaluateConditionResponseRule(ResponseRuleDto rule, JsonElement selected, string targetPath, string expectedType, int attemptCount, DateTime nowUtc)
+    {
+        var operatorName = NormalizeConditionOperator(rule.Operator, expectedType);
+        var expectedValue = rule.ExpectedValue ?? string.Empty;
+        var actualValue = JsonElementToComparableText(selected, expectedType);
+        var matched = EvaluateCondition(selected, actualValue, expectedValue, expectedType, operatorName, rule.CaseSensitive ?? false);
+        var action = NormalizeRuleBehavior(matched ? rule.OnMatchBehavior : rule.OnMismatchBehavior, matched ? "advance" : "retry");
+        var comparisonText = BuildConditionText(targetPath, operatorName, expectedValue);
+
+        if (action == "retry" && rule.MaxAttempts.HasValue && attemptCount >= rule.MaxAttempts.Value)
+        {
+            return new ResponseRuleEvaluationDto(
+                true,
+                "failed",
+                "fail",
+                $"Limite de {rule.MaxAttempts.Value} tentativa(s) atingido aguardando {comparisonText}. Ultimo valor: {actualValue}.",
+                targetPath,
+                expectedType,
+                IsResponseValueEmpty(selected, expectedType),
+                attemptCount,
+                rule.MaxAttempts,
+                rule.RetryIntervalMinutes,
+                Mode: "condition",
+                Operator: operatorName,
+                ActualValue: actualValue,
+                ExpectedValue: expectedValue,
+                Matched: matched);
+        }
+
+        if (action == "retry")
+        {
+            var retryMinutes = Math.Clamp(rule.RetryIntervalMinutes ?? 3, 1, 10080);
+            return new ResponseRuleEvaluationDto(
+                true,
+                "waiting",
+                "retry",
+                $"Condicao ainda nao atendida: {comparisonText}. Valor atual: {actualValue}. Nova tentativa em {retryMinutes} minuto(s).",
+                targetPath,
+                expectedType,
+                IsResponseValueEmpty(selected, expectedType),
+                attemptCount,
+                rule.MaxAttempts,
+                retryMinutes,
+                nowUtc.AddMinutes(retryMinutes),
+                "condition",
+                operatorName,
+                actualValue,
+                expectedValue,
+                matched);
+        }
+
+        if (action == "fail")
+        {
+            return new ResponseRuleEvaluationDto(
+                true,
+                "failed",
+                "fail",
+                matched
+                    ? $"Condicao atendida e configurada para falhar: {comparisonText}."
+                    : $"Condicao nao atendida: {comparisonText}. Valor atual: {actualValue}.",
+                targetPath,
+                expectedType,
+                IsResponseValueEmpty(selected, expectedType),
+                attemptCount,
+                rule.MaxAttempts,
+                rule.RetryIntervalMinutes,
+                Mode: "condition",
+                Operator: operatorName,
+                ActualValue: actualValue,
+                ExpectedValue: expectedValue,
+                Matched: matched);
+        }
+
+        return new ResponseRuleEvaluationDto(
+            true,
+            "matched",
+            "advance",
+            matched
+                ? $"Condicao atendida: {comparisonText}."
+                : $"Condicao nao atendida, mas configurada para avancar: {comparisonText}. Valor atual: {actualValue}.",
+            targetPath,
+            expectedType,
+            IsResponseValueEmpty(selected, expectedType),
+            attemptCount,
+            rule.MaxAttempts,
+            rule.RetryIntervalMinutes,
+            Mode: "condition",
+            Operator: operatorName,
+            ActualValue: actualValue,
+            ExpectedValue: expectedValue,
+            Matched: matched);
+    }
+
     private static ResponseRuleEvaluationDto BuildRuleFailure(ResponseRuleDto rule, string targetPath, string expectedType, int attemptCount, string reason, string failureBehavior, DateTime nowUtc)
     {
         if (failureBehavior == "retry")
         {
             var retryMinutes = Math.Clamp(rule.RetryIntervalMinutes ?? 3, 1, 10080);
-            return new ResponseRuleEvaluationDto(true, "waiting", "retry", reason, targetPath, expectedType, true, attemptCount, rule.MaxAttempts, retryMinutes, nowUtc.AddMinutes(retryMinutes));
+            return new ResponseRuleEvaluationDto(true, "waiting", "retry", reason, targetPath, expectedType, true, attemptCount, rule.MaxAttempts, retryMinutes, nowUtc.AddMinutes(retryMinutes), NormalizeRuleMode(rule.Mode));
         }
 
         if (failureBehavior == "advance")
         {
-            return new ResponseRuleEvaluationDto(true, "matched", "advance", reason, targetPath, expectedType, true, attemptCount, rule.MaxAttempts, rule.RetryIntervalMinutes);
+            return new ResponseRuleEvaluationDto(true, "matched", "advance", reason, targetPath, expectedType, true, attemptCount, rule.MaxAttempts, rule.RetryIntervalMinutes, Mode: NormalizeRuleMode(rule.Mode));
         }
 
-        return new ResponseRuleEvaluationDto(true, "failed", "fail", reason, targetPath, expectedType, true, attemptCount, rule.MaxAttempts, rule.RetryIntervalMinutes);
+        return new ResponseRuleEvaluationDto(true, "failed", "fail", reason, targetPath, expectedType, true, attemptCount, rule.MaxAttempts, rule.RetryIntervalMinutes, Mode: NormalizeRuleMode(rule.Mode));
     }
 
     private static ResponseRuleDto BuildRuntimeResponseRule(StepApiConfigDto config)
@@ -584,6 +687,13 @@ internal sealed class IntegrationExecutionService(
         return new ResponseRuleDto();
     }
 
+    private static string NormalizeRuleMode(string? value)
+    {
+        return string.Equals(value?.Trim(), "condition", StringComparison.OrdinalIgnoreCase)
+            ? "condition"
+            : "emptyCheck";
+    }
+
     private static string NormalizeRuleBehavior(string? value, string fallback)
     {
         var normalized = value?.Trim().ToLowerInvariant();
@@ -594,6 +704,34 @@ internal sealed class IntegrationExecutionService(
     {
         var normalized = value?.Trim().ToLowerInvariant();
         return normalized is "array" or "object" or "string" or "number" or "boolean" or "any" ? normalized : "array";
+    }
+
+    private static string NormalizeConditionOperator(string? value, string expectedType)
+    {
+        var normalized = value?.Trim();
+        if (IsValidConditionOperator(expectedType, normalized))
+        {
+            return normalized!;
+        }
+
+        return expectedType is "array" or "object" or "any" ? "isNotEmpty" : "equals";
+    }
+
+    private static bool IsValidConditionOperator(string expectedType, string? operatorName)
+    {
+        if (string.IsNullOrWhiteSpace(operatorName))
+        {
+            return false;
+        }
+
+        return expectedType switch
+        {
+            "string" => operatorName is "equals" or "notEquals" or "contains" or "notContains" or "startsWith" or "endsWith" or "isEmpty" or "isNotEmpty",
+            "number" => operatorName is "equals" or "notEquals" or "greaterThan" or "greaterThanOrEqual" or "lessThan" or "lessThanOrEqual" or "isEmpty" or "isNotEmpty",
+            "boolean" => operatorName is "equals" or "notEquals" or "isEmpty" or "isNotEmpty",
+            "array" or "object" or "any" => operatorName is "isEmpty" or "isNotEmpty",
+            _ => false
+        };
     }
 
     private static bool TryResolveResponseRulePath(JsonElement root, string path, out JsonElement value)
@@ -618,6 +756,120 @@ internal sealed class IntegrationExecutionService(
             "boolean" => value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined || value.ValueKind is not (JsonValueKind.True or JsonValueKind.False),
             _ => value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined
         };
+    }
+
+    private static bool EvaluateCondition(JsonElement selected, string actualValue, string expectedValue, string expectedType, string operatorName, bool caseSensitive)
+    {
+        if (operatorName == "isEmpty")
+        {
+            return IsResponseValueEmpty(selected, expectedType);
+        }
+
+        if (operatorName == "isNotEmpty")
+        {
+            return !IsResponseValueEmpty(selected, expectedType);
+        }
+
+        if (expectedType == "number")
+        {
+            var actualNumberOk = decimal.TryParse(actualValue, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var actualNumber);
+            var expectedNumberOk = decimal.TryParse(expectedValue, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out var expectedNumber);
+            if (!actualNumberOk || !expectedNumberOk)
+            {
+                return false;
+            }
+
+            return operatorName switch
+            {
+                "equals" => actualNumber == expectedNumber,
+                "notEquals" => actualNumber != expectedNumber,
+                "greaterThan" => actualNumber > expectedNumber,
+                "greaterThanOrEqual" => actualNumber >= expectedNumber,
+                "lessThan" => actualNumber < expectedNumber,
+                "lessThanOrEqual" => actualNumber <= expectedNumber,
+                _ => false
+            };
+        }
+
+        if (expectedType == "boolean")
+        {
+            var actualBoolOk = bool.TryParse(actualValue, out var actualBool);
+            var expectedBoolOk = bool.TryParse(expectedValue, out var expectedBool);
+            if (!actualBoolOk || !expectedBoolOk)
+            {
+                return false;
+            }
+
+            return operatorName switch
+            {
+                "equals" => actualBool == expectedBool,
+                "notEquals" => actualBool != expectedBool,
+                _ => false
+            };
+        }
+
+        var comparison = caseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+        return operatorName switch
+        {
+            "equals" => string.Equals(actualValue, expectedValue, comparison),
+            "notEquals" => !string.Equals(actualValue, expectedValue, comparison),
+            "contains" => actualValue.Contains(expectedValue, comparison),
+            "notContains" => !actualValue.Contains(expectedValue, comparison),
+            "startsWith" => actualValue.StartsWith(expectedValue, comparison),
+            "endsWith" => actualValue.EndsWith(expectedValue, comparison),
+            _ => false
+        };
+    }
+
+    private static string JsonElementToComparableText(JsonElement value, string expectedType)
+    {
+        if (value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            return string.Empty;
+        }
+
+        if (expectedType == "string" && value.ValueKind == JsonValueKind.String)
+        {
+            return value.GetString() ?? string.Empty;
+        }
+
+        if (expectedType == "number" && value.ValueKind == JsonValueKind.Number)
+        {
+            return value.GetRawText();
+        }
+
+        if (expectedType == "boolean" && value.ValueKind is JsonValueKind.True or JsonValueKind.False)
+        {
+            return value.GetBoolean().ToString();
+        }
+
+        return value.ValueKind == JsonValueKind.String
+            ? value.GetString() ?? string.Empty
+            : value.ToString();
+    }
+
+    private static string BuildConditionText(string targetPath, string operatorName, string expectedValue)
+    {
+        var operatorText = operatorName switch
+        {
+            "equals" => "igual a",
+            "notEquals" => "diferente de",
+            "contains" => "contendo",
+            "notContains" => "nao contendo",
+            "startsWith" => "comecando com",
+            "endsWith" => "terminando com",
+            "greaterThan" => "maior que",
+            "greaterThanOrEqual" => "maior ou igual a",
+            "lessThan" => "menor que",
+            "lessThanOrEqual" => "menor ou igual a",
+            "isEmpty" => "vazio",
+            "isNotEmpty" => "preenchido",
+            _ => operatorName
+        };
+
+        return operatorName is "isEmpty" or "isNotEmpty"
+            ? $"{targetPath} {operatorText}"
+            : $"{targetPath} {operatorText} {expectedValue}";
     }
 
     private static string? BuildRequestHeadersPreview(HttpRequestMessage request)
@@ -1226,6 +1478,11 @@ internal sealed class InstanceAutomationService(
         currentData.Remove("_integration.responseRule.reason");
         currentData.Remove("_integration.responseRule.targetPath");
         currentData.Remove("_integration.responseRule.expectedType");
+        currentData.Remove("_integration.responseRule.mode");
+        currentData.Remove("_integration.responseRule.operator");
+        currentData.Remove("_integration.responseRule.actualValue");
+        currentData.Remove("_integration.responseRule.expectedValue");
+        currentData.Remove("_integration.responseRule.matched");
         currentData.Remove("_integration.responseRule.retryIntervalMinutes");
         currentData.Remove("_integration.responseRule.attemptCount");
         currentData.Remove("_integration.responseRule.maxAttempts");
@@ -1268,6 +1525,31 @@ internal sealed class InstanceAutomationService(
             currentData["_integration.responseRule.targetPath"] = JsonSerializer.SerializeToElement(result.ResponseRuleEvaluation.TargetPath);
             currentData["_integration.responseRule.expectedType"] = JsonSerializer.SerializeToElement(result.ResponseRuleEvaluation.ExpectedType);
             currentData["_integration.responseRule.attemptCount"] = JsonSerializer.SerializeToElement(result.ResponseRuleEvaluation.AttemptCount);
+
+            if (!string.IsNullOrWhiteSpace(result.ResponseRuleEvaluation.Mode))
+            {
+                currentData["_integration.responseRule.mode"] = JsonSerializer.SerializeToElement(result.ResponseRuleEvaluation.Mode);
+            }
+
+            if (!string.IsNullOrWhiteSpace(result.ResponseRuleEvaluation.Operator))
+            {
+                currentData["_integration.responseRule.operator"] = JsonSerializer.SerializeToElement(result.ResponseRuleEvaluation.Operator);
+            }
+
+            if (result.ResponseRuleEvaluation.ActualValue is not null)
+            {
+                currentData["_integration.responseRule.actualValue"] = JsonSerializer.SerializeToElement(result.ResponseRuleEvaluation.ActualValue);
+            }
+
+            if (result.ResponseRuleEvaluation.ExpectedValue is not null)
+            {
+                currentData["_integration.responseRule.expectedValue"] = JsonSerializer.SerializeToElement(result.ResponseRuleEvaluation.ExpectedValue);
+            }
+
+            if (result.ResponseRuleEvaluation.Matched.HasValue)
+            {
+                currentData["_integration.responseRule.matched"] = JsonSerializer.SerializeToElement(result.ResponseRuleEvaluation.Matched.Value);
+            }
 
             if (result.ResponseRuleEvaluation.MaxAttempts.HasValue)
             {

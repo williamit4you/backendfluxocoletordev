@@ -459,23 +459,31 @@ public sealed class FlowManagementService(
         }
 
         var responseRule = NormalizeResponseRule(step.ApiConfig);
-        if (responseRule.Enabled && responseRule.EmptyBehavior == "retry")
+        var retryBehavior = responseRule.Mode == "condition"
+            ? responseRule.OnMismatchBehavior
+            : responseRule.EmptyBehavior;
+        if (responseRule.Enabled && retryBehavior == "retry")
         {
             if (step.Type != StepType.ApiQuery && step.Type != StepType.ApiSend)
             {
-                throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' so pode usar a regra de retorno vazio em API envio ou API consulta."] });
+                throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' so pode usar regra de retorno com nova tentativa em API envio ou API consulta."] });
             }
 
             var retryMinutes = responseRule.RetryIntervalMinutes ?? 0;
             if (retryMinutes < 1 || retryMinutes > 10080)
             {
-                throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' precisa ter intervalo de nova consulta entre 1 e 10080 minutos quando a resposta vier vazia."] });
+                throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' precisa ter intervalo de nova consulta entre 1 e 10080 minutos na regra de retorno."] });
             }
         }
 
         if (responseRule.Enabled && responseRule.MaxAttempts is < 1 or > 1000)
         {
             throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' precisa ter limite de tentativas entre 1 e 1000 na regra de retorno."] });
+        }
+
+        if (responseRule.Enabled && responseRule.Mode == "condition" && !IsValidConditionOperator(responseRule.ExpectedType, responseRule.Operator))
+        {
+            throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' possui operador invalido para o tipo esperado na regra de retorno."] });
         }
     }
 
@@ -517,11 +525,11 @@ public sealed class FlowManagementService(
             ScheduleAssist = assist,
             Headers = config.Headers?.Where(x => !string.IsNullOrWhiteSpace(x.Name) && !string.IsNullOrWhiteSpace(x.Value)).Select(x => new RequestHeaderDto(x.Name.Trim(), x.Value.Trim())).ToList(),
             BodyTemplate = string.IsNullOrWhiteSpace(config.BodyTemplate) ? null : config.BodyTemplate.Trim(),
-            RetryOnEmptyArray = responseRule.Enabled && responseRule.EmptyBehavior == "retry",
-            EmptyArrayRetryMinutes = responseRule.Enabled && responseRule.EmptyBehavior == "retry"
+            RetryOnEmptyArray = responseRule.Enabled && responseRule.Mode != "condition" && responseRule.EmptyBehavior == "retry",
+            EmptyArrayRetryMinutes = responseRule.Enabled && responseRule.Mode != "condition" && responseRule.EmptyBehavior == "retry"
                 ? responseRule.RetryIntervalMinutes
                 : null,
-            EmptyArrayAction = responseRule.Enabled ? responseRule.EmptyBehavior : "advance",
+            EmptyArrayAction = responseRule.Enabled && responseRule.Mode != "condition" ? responseRule.EmptyBehavior : "advance",
             ResponseRule = responseRule
         };
     }
@@ -530,17 +538,24 @@ public sealed class FlowManagementService(
     {
         var source = config.ResponseRule;
         var enabled = source?.Enabled ?? config.RetryOnEmptyArray;
+        var mode = NormalizeRuleMode(source?.Mode);
         var emptyBehavior = NormalizeRuleBehavior(source?.EmptyBehavior ?? config.EmptyArrayAction ?? (config.RetryOnEmptyArray ? "retry" : "advance"), "advance");
         var nonEmptyBehavior = NormalizeRuleBehavior(source?.NonEmptyBehavior ?? "advance", "advance");
+        var onMatchBehavior = NormalizeRuleBehavior(source?.OnMatchBehavior ?? source?.NonEmptyBehavior ?? "advance", "advance");
+        var onMismatchBehavior = NormalizeRuleBehavior(source?.OnMismatchBehavior ?? source?.EmptyBehavior ?? config.EmptyArrayAction ?? (config.RetryOnEmptyArray ? "retry" : "advance"), "retry");
         var failureBehavior = NormalizeRuleBehavior(source?.FailureBehavior ?? "fail", "fail");
         var expectedType = NormalizeExpectedType(source?.ExpectedType ?? "array");
         var targetPath = string.IsNullOrWhiteSpace(source?.TargetPath) ? "$" : source!.TargetPath!.Trim();
-        int? retryInterval = emptyBehavior == "retry"
+        var needsRetry = mode == "condition"
+            ? onMatchBehavior == "retry" || onMismatchBehavior == "retry"
+            : emptyBehavior == "retry" || nonEmptyBehavior == "retry";
+        int? retryInterval = needsRetry
             ? Math.Clamp(source?.RetryIntervalMinutes ?? config.EmptyArrayRetryMinutes ?? 3, 1, 10080)
             : null;
-        int? maxAttempts = emptyBehavior == "retry"
+        int? maxAttempts = needsRetry
             ? Math.Clamp(source?.MaxAttempts ?? 20, 1, 1000)
             : source?.MaxAttempts;
+        var operatorName = NormalizeConditionOperator(source?.Operator, expectedType);
 
         return new ResponseRuleDto(
             enabled,
@@ -551,7 +566,50 @@ public sealed class FlowManagementService(
             retryInterval,
             maxAttempts,
             failureBehavior,
-            string.IsNullOrWhiteSpace(source?.Description) ? null : source.Description.Trim());
+            string.IsNullOrWhiteSpace(source?.Description) ? null : source.Description.Trim(),
+            mode,
+            operatorName,
+            string.IsNullOrWhiteSpace(source?.ExpectedValue) ? null : source.ExpectedValue.Trim(),
+            source?.CaseSensitive ?? false,
+            onMatchBehavior,
+            onMismatchBehavior);
+    }
+
+    private static string NormalizeRuleMode(string? value)
+    {
+        return string.Equals(value?.Trim(), "condition", StringComparison.OrdinalIgnoreCase)
+            ? "condition"
+            : "emptyCheck";
+    }
+
+    private static string NormalizeConditionOperator(string? value, string? expectedType)
+    {
+        var normalized = value?.Trim();
+        if (IsValidConditionOperator(expectedType, normalized))
+        {
+            return normalized!;
+        }
+
+        return expectedType == "array" || expectedType == "object" ? "isNotEmpty" : "equals";
+    }
+
+    private static bool IsValidConditionOperator(string? expectedType, string? operatorName)
+    {
+        var normalizedType = NormalizeExpectedType(expectedType);
+        var normalizedOperator = operatorName?.Trim();
+        if (string.IsNullOrWhiteSpace(normalizedOperator))
+        {
+            return false;
+        }
+
+        return normalizedType switch
+        {
+            "string" => normalizedOperator is "equals" or "notEquals" or "contains" or "notContains" or "startsWith" or "endsWith" or "isEmpty" or "isNotEmpty",
+            "number" => normalizedOperator is "equals" or "notEquals" or "greaterThan" or "greaterThanOrEqual" or "lessThan" or "lessThanOrEqual" or "isEmpty" or "isNotEmpty",
+            "boolean" => normalizedOperator is "equals" or "notEquals" or "isEmpty" or "isNotEmpty",
+            "array" or "object" or "any" => normalizedOperator is "isEmpty" or "isNotEmpty",
+            _ => false
+        };
     }
 
     private static string NormalizeRuleBehavior(string? value, string fallback)
