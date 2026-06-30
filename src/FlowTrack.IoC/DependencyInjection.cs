@@ -522,7 +522,7 @@ internal sealed class IntegrationExecutionService(
 
         foreach (var segment in path.Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
-            if (value.ValueKind == JsonValueKind.Object && value.TryGetProperty(segment, out var property))
+            if (value.ValueKind == JsonValueKind.Object && TryGetPropertyCaseInsensitive(value, segment, out var property))
             {
                 value = property;
                 continue;
@@ -542,6 +542,26 @@ internal sealed class IntegrationExecutionService(
         }
 
         return true;
+    }
+
+    private static bool TryGetPropertyCaseInsensitive(JsonElement element, string propertyName, out JsonElement value)
+    {
+        if (element.TryGetProperty(propertyName, out value))
+        {
+            return true;
+        }
+
+        foreach (var property in element.EnumerateObject())
+        {
+            if (string.Equals(property.Name, propertyName, StringComparison.OrdinalIgnoreCase))
+            {
+                value = property.Value;
+                return true;
+            }
+        }
+
+        value = default;
+        return false;
     }
 
     private void ApplyToken(FlowDefinition flow, StepApiConfigDto config, HttpRequestMessage request)
