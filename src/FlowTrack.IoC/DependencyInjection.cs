@@ -158,9 +158,43 @@ internal sealed class IntegrationExecutionService(
             var responseText = await response.Content.ReadAsStringAsync(cancellationToken);
             var preview = Truncate(responseText);
             var success = response.IsSuccessStatusCode;
+            if (success && (step.Type == StepType.ApiQuery || step.Type == StepType.ApiSend))
+            {
+                logger.LogInformation(
+                    "Antes do mapeamento da resposta. StepId={StepId}, Tipo={StepType}, ResponseMappings={ResponseMappings}, ResponsePreview={ResponsePreview}",
+                    step.Id,
+                    step.Type,
+                    config.ResponseMappings is null
+                        ? "[]"
+                        : JsonSerializer.Serialize(config.ResponseMappings, RelaxedJsonOptions),
+                    preview);
+            }
+
             var mappedData = success && (step.Type == StepType.ApiQuery || step.Type == StepType.ApiSend)
                 ? MapResponseData(config, responseText)
                 : null;
+
+            if (success && (step.Type == StepType.ApiQuery || step.Type == StepType.ApiSend))
+            {
+                if (mappedData is null || mappedData.Count == 0)
+                {
+                    logger.LogWarning(
+                        "Nenhum valor foi capturado no mapeamento da resposta. StepId={StepId}, Tipo={StepType}, ResponseMappings={ResponseMappings}",
+                        step.Id,
+                        step.Type,
+                        config.ResponseMappings is null
+                            ? "[]"
+                            : JsonSerializer.Serialize(config.ResponseMappings, RelaxedJsonOptions));
+                }
+                else
+                {
+                    logger.LogInformation(
+                        "Depois do mapeamento da resposta. StepId={StepId}, Tipo={StepType}, MappedData={MappedData}",
+                        step.Id,
+                        step.Type,
+                        JsonSerializer.Serialize(mappedData, RelaxedJsonOptions));
+                }
+            }
 
             return await SaveAttemptAsync(
                 step,
@@ -797,9 +831,18 @@ internal sealed class TokenProtectionService(IConfiguration configuration) : ITo
         var cipher = payload[28..];
         var plaintext = new byte[cipher.Length];
 
-        using var aes = new AesGcm(_key, 16);
-        aes.Decrypt(nonce, cipher, tag, plaintext);
-        return Encoding.UTF8.GetString(plaintext);
+        try
+        {
+            using var aes = new AesGcm(_key, 16);
+            aes.Decrypt(nonce, cipher, tag, plaintext);
+            return Encoding.UTF8.GetString(plaintext);
+        }
+        catch (CryptographicException ex)
+        {
+            throw new InvalidOperationException(
+                "Nao foi possivel descriptografar o token. O valor salvo provavelmente foi protegido com outra chave. Confira TokenEncryption:Key ou Jwt:Secret do ambiente atual.",
+                ex);
+        }
     }
 }
 
@@ -997,6 +1040,16 @@ internal sealed class InstanceAutomationService(
         if (!string.IsNullOrWhiteSpace(result.ErrorMessage))
         {
             currentData["_integration.errorMessage"] = JsonSerializer.SerializeToElement(result.ErrorMessage);
+        }
+
+        if (result.MappedData is null || result.MappedData.Count == 0)
+        {
+            currentData["_integration.mappingWarning"] = JsonSerializer.SerializeToElement("Nenhum valor foi capturado no mapeamento da resposta.");
+        }
+        else
+        {
+            currentData["_integration.mappingResult"] = JsonSerializer.SerializeToElement(
+                result.MappedData.ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.OrdinalIgnoreCase));
         }
     }
 }
