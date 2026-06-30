@@ -117,7 +117,7 @@ internal sealed class IntegrationExecutionService(
 
         if (config is null || string.IsNullOrWhiteSpace(config.Url))
         {
-            return await SaveAttemptAsync(step, triggerType, "GET", "", false, null, 0, null, null, null, "Etapa sem configuracao de integracao.", null, false, null, null, instance, stepExecution, cancellationToken);
+            return await SaveAttemptAsync(step, triggerType, "GET", "", false, null, 0, null, null, null, "Etapa sem configuracao de integracao.", null, false, null, null, null, instance, stepExecution, cancellationToken);
         }
 
         var method = ResolveMethod(step.Type, config.Method);
@@ -131,7 +131,7 @@ internal sealed class IntegrationExecutionService(
         if (validationError is not null)
         {
             logger.LogWarning("Destino de integracao bloqueado para a etapa {StepId}: {Error}", step.Id, validationError);
-            return await SaveAttemptAsync(step, triggerType, method, SanitizeUrl(resolvedUrl), false, null, 0, null, null, null, validationError, null, false, null, null, instance, stepExecution, cancellationToken);
+            return await SaveAttemptAsync(step, triggerType, method, SanitizeUrl(resolvedUrl), false, null, 0, null, null, null, validationError, null, false, null, null, null, instance, stepExecution, cancellationToken);
         }
 
         using var request = new HttpRequestMessage(new HttpMethod(method), resolvedUrl);
@@ -173,12 +173,17 @@ internal sealed class IntegrationExecutionService(
             var mappedData = success && (step.Type == StepType.ApiQuery || step.Type == StepType.ApiSend)
                 ? MapResponseData(config, responseText)
                 : null;
-            var awaitingData = success
-                && (step.Type == StepType.ApiQuery || step.Type == StepType.ApiSend)
-                && config.RetryOnEmptyArray
-                && IsEmptyArrayResponse(responseText);
+            var attemptCount = await CountRuntimeAttemptsAsync(instance, step.Id, triggerType, cancellationToken) + 1;
+            var ruleEvaluation = success && (step.Type == StepType.ApiQuery || step.Type == StepType.ApiSend)
+                ? EvaluateResponseRule(config, responseText, attemptCount, DateTime.UtcNow)
+                : null;
+            var awaitingData = ruleEvaluation?.Action == "retry";
+            var semanticSuccess = success && ruleEvaluation?.Action != "fail";
+            var semanticError = semanticSuccess
+                ? null
+                : ruleEvaluation?.Reason ?? $"Resposta HTTP {(int)response.StatusCode}.";
             var awaitingDataMessage = awaitingData
-                ? $"Retorno vazio detectado. Nova tentativa em {config.EmptyArrayRetryMinutes ?? 3} minuto(s)."
+                ? ruleEvaluation?.Reason
                 : null;
 
             if (success && (step.Type == StepType.ApiQuery || step.Type == StepType.ApiSend))
@@ -215,17 +220,18 @@ internal sealed class IntegrationExecutionService(
                 triggerType,
                 method,
                 SanitizeUrl(resolvedUrl),
-                success,
+                semanticSuccess,
                 (int)response.StatusCode,
                 (int)watch.ElapsedMilliseconds,
                 requestHeadersPreview,
                 requestBodyPreview,
                 preview,
-                success ? null : $"Resposta HTTP {(int)response.StatusCode}.",
+                semanticError,
                 mappedData,
                 awaitingData,
                 awaitingDataMessage,
-                awaitingData ? config.EmptyArrayRetryMinutes ?? 3 : null,
+                ruleEvaluation?.RetryIntervalMinutes,
+                ruleEvaluation,
                 instance,
                 stepExecution,
                 cancellationToken);
@@ -247,6 +253,7 @@ internal sealed class IntegrationExecutionService(
                 Truncate(ex.Message, 400),
                 null,
                 false,
+                null,
                 null,
                 null,
                 instance,
@@ -445,15 +452,172 @@ internal sealed class IntegrationExecutionService(
         return mapped.Count == 0 ? null : mapped;
     }
 
-    private static bool IsEmptyArrayResponse(string responseText)
+    private async Task<int> CountRuntimeAttemptsAsync(FlowInstance? instance, Guid stepId, IntegrationTriggerType triggerType, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(responseText))
+        if (instance is null || triggerType != IntegrationTriggerType.Runtime)
         {
-            return false;
+            return 0;
         }
 
-        using var document = JsonDocument.Parse(responseText);
-        return document.RootElement.ValueKind == JsonValueKind.Array && document.RootElement.GetArrayLength() == 0;
+        return await db.IntegrationAttempts
+            .AsNoTracking()
+            .CountAsync(x => x.FlowInstanceId == instance.Id && x.FlowStepId == stepId && x.TriggerType == IntegrationTriggerType.Runtime, cancellationToken);
+    }
+
+    private static ResponseRuleEvaluationDto? EvaluateResponseRule(StepApiConfigDto config, string responseText, int attemptCount, DateTime nowUtc)
+    {
+        var rule = BuildRuntimeResponseRule(config);
+        if (!rule.Enabled)
+        {
+            return null;
+        }
+
+        var targetPath = string.IsNullOrWhiteSpace(rule.TargetPath) ? "$" : rule.TargetPath.Trim();
+        var expectedType = NormalizeExpectedType(rule.ExpectedType);
+        var emptyBehavior = NormalizeRuleBehavior(rule.EmptyBehavior, "advance");
+        var nonEmptyBehavior = NormalizeRuleBehavior(rule.NonEmptyBehavior, "advance");
+        var failureBehavior = NormalizeRuleBehavior(rule.FailureBehavior, "fail");
+
+        try
+        {
+            using var document = JsonDocument.Parse(responseText);
+            if (!TryResolveResponseRulePath(document.RootElement, targetPath, out var selected))
+            {
+                return BuildRuleFailure(rule, targetPath, expectedType, attemptCount, $"Caminho '{targetPath}' nao encontrado na resposta.", failureBehavior, nowUtc);
+            }
+
+            var isEmpty = IsResponseValueEmpty(selected, expectedType);
+            var action = isEmpty ? emptyBehavior : nonEmptyBehavior;
+            if (action == "retry" && rule.MaxAttempts.HasValue && attemptCount >= rule.MaxAttempts.Value)
+            {
+                return new ResponseRuleEvaluationDto(
+                    true,
+                    "failed",
+                    "fail",
+                    $"Limite de {rule.MaxAttempts.Value} tentativa(s) atingido com retorno vazio em {targetPath}.",
+                    targetPath,
+                    expectedType,
+                    isEmpty,
+                    attemptCount,
+                    rule.MaxAttempts,
+                    rule.RetryIntervalMinutes);
+            }
+
+            if (action == "retry")
+            {
+                var retryMinutes = Math.Clamp(rule.RetryIntervalMinutes ?? 3, 1, 10080);
+                return new ResponseRuleEvaluationDto(
+                    true,
+                    "waiting",
+                    "retry",
+                    $"Retorno vazio em {targetPath}. Nova tentativa em {retryMinutes} minuto(s).",
+                    targetPath,
+                    expectedType,
+                    isEmpty,
+                    attemptCount,
+                    rule.MaxAttempts,
+                    retryMinutes,
+                    nowUtc.AddMinutes(retryMinutes));
+            }
+
+            if (action == "fail")
+            {
+                return new ResponseRuleEvaluationDto(
+                    true,
+                    "failed",
+                    "fail",
+                    isEmpty ? $"Retorno vazio em {targetPath}." : $"Regra configurada para falhar quando {targetPath} tiver conteudo.",
+                    targetPath,
+                    expectedType,
+                    isEmpty,
+                    attemptCount,
+                    rule.MaxAttempts,
+                    rule.RetryIntervalMinutes);
+            }
+
+            return new ResponseRuleEvaluationDto(
+                true,
+                "matched",
+                "advance",
+                isEmpty ? $"Retorno vazio em {targetPath} aceito pela regra." : $"Retorno com conteudo encontrado em {targetPath}.",
+                targetPath,
+                expectedType,
+                isEmpty,
+                attemptCount,
+                rule.MaxAttempts,
+                rule.RetryIntervalMinutes);
+        }
+        catch (JsonException)
+        {
+            return BuildRuleFailure(rule, targetPath, expectedType, attemptCount, "Resposta nao e um JSON valido.", failureBehavior, nowUtc);
+        }
+    }
+
+    private static ResponseRuleEvaluationDto BuildRuleFailure(ResponseRuleDto rule, string targetPath, string expectedType, int attemptCount, string reason, string failureBehavior, DateTime nowUtc)
+    {
+        if (failureBehavior == "retry")
+        {
+            var retryMinutes = Math.Clamp(rule.RetryIntervalMinutes ?? 3, 1, 10080);
+            return new ResponseRuleEvaluationDto(true, "waiting", "retry", reason, targetPath, expectedType, true, attemptCount, rule.MaxAttempts, retryMinutes, nowUtc.AddMinutes(retryMinutes));
+        }
+
+        if (failureBehavior == "advance")
+        {
+            return new ResponseRuleEvaluationDto(true, "matched", "advance", reason, targetPath, expectedType, true, attemptCount, rule.MaxAttempts, rule.RetryIntervalMinutes);
+        }
+
+        return new ResponseRuleEvaluationDto(true, "failed", "fail", reason, targetPath, expectedType, true, attemptCount, rule.MaxAttempts, rule.RetryIntervalMinutes);
+    }
+
+    private static ResponseRuleDto BuildRuntimeResponseRule(StepApiConfigDto config)
+    {
+        if (config.ResponseRule is not null)
+        {
+            return config.ResponseRule;
+        }
+
+        if (config.RetryOnEmptyArray)
+        {
+            return new ResponseRuleDto(true, "$", "array", "retry", "advance", config.EmptyArrayRetryMinutes ?? 3, 20, "fail", null);
+        }
+
+        return new ResponseRuleDto();
+    }
+
+    private static string NormalizeRuleBehavior(string? value, string fallback)
+    {
+        var normalized = value?.Trim().ToLowerInvariant();
+        return normalized is "advance" or "retry" or "fail" ? normalized : fallback;
+    }
+
+    private static string NormalizeExpectedType(string? value)
+    {
+        var normalized = value?.Trim().ToLowerInvariant();
+        return normalized is "array" or "object" or "string" or "number" or "boolean" or "any" ? normalized : "array";
+    }
+
+    private static bool TryResolveResponseRulePath(JsonElement root, string path, out JsonElement value)
+    {
+        if (string.IsNullOrWhiteSpace(path) || path.Trim() == "$")
+        {
+            value = root;
+            return true;
+        }
+
+        return TryResolveJsonPath(root, path.Trim().TrimStart('$').TrimStart('.'), out value);
+    }
+
+    private static bool IsResponseValueEmpty(JsonElement value, string expectedType)
+    {
+        return expectedType switch
+        {
+            "array" => value.ValueKind != JsonValueKind.Array || value.GetArrayLength() == 0,
+            "object" => value.ValueKind != JsonValueKind.Object || !value.EnumerateObject().Any(),
+            "string" => value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined || string.IsNullOrWhiteSpace(value.ToString()),
+            "number" => value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined || value.ValueKind != JsonValueKind.Number,
+            "boolean" => value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined || value.ValueKind is not (JsonValueKind.True or JsonValueKind.False),
+            _ => value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined
+        };
     }
 
     private static string? BuildRequestHeadersPreview(HttpRequestMessage request)
@@ -786,6 +950,7 @@ internal sealed class IntegrationExecutionService(
         bool awaitingData,
         string? awaitingDataMessage,
         int? retryAfterMinutes,
+        ResponseRuleEvaluationDto? responseRuleEvaluation,
         FlowInstance? instance,
         StepExecution? stepExecution,
         CancellationToken cancellationToken)
@@ -826,7 +991,7 @@ internal sealed class IntegrationExecutionService(
             ", cancellationToken);
         }
 
-        return new IntegrationExecutionResult(success, statusCode, durationMs, attempt.Url, method, attempt.RequestHeaders, attempt.RequestBody, attempt.ResponsePreview, attempt.ErrorMessage, mappedData, awaitingData, awaitingDataMessage, retryAfterMinutes);
+        return new IntegrationExecutionResult(success, statusCode, durationMs, attempt.Url, method, attempt.RequestHeaders, attempt.RequestBody, attempt.ResponsePreview, attempt.ErrorMessage, mappedData, awaitingData, awaitingDataMessage, retryAfterMinutes, responseRuleEvaluation);
     }
 }
 
@@ -1057,6 +1222,14 @@ internal sealed class InstanceAutomationService(
         currentData.Remove("_integration.awaitingData");
         currentData.Remove("_integration.awaitingDataMessage");
         currentData.Remove("_integration.emptyResultRetryMinutes");
+        currentData.Remove("_integration.responseRule.status");
+        currentData.Remove("_integration.responseRule.reason");
+        currentData.Remove("_integration.responseRule.targetPath");
+        currentData.Remove("_integration.responseRule.expectedType");
+        currentData.Remove("_integration.responseRule.retryIntervalMinutes");
+        currentData.Remove("_integration.responseRule.attemptCount");
+        currentData.Remove("_integration.responseRule.maxAttempts");
+        currentData.Remove("_integration.responseRule.nextAttemptAtUtc");
         currentData["_integration.success"] = JsonSerializer.SerializeToElement(result.Success);
         currentData["_integration.method"] = JsonSerializer.SerializeToElement(result.Method);
         currentData["_integration.url"] = JsonSerializer.SerializeToElement(result.Url);
@@ -1086,6 +1259,30 @@ internal sealed class InstanceAutomationService(
         if (!string.IsNullOrWhiteSpace(result.ErrorMessage))
         {
             currentData["_integration.errorMessage"] = JsonSerializer.SerializeToElement(result.ErrorMessage);
+        }
+
+        if (result.ResponseRuleEvaluation is not null)
+        {
+            currentData["_integration.responseRule.status"] = JsonSerializer.SerializeToElement(result.ResponseRuleEvaluation.Status);
+            currentData["_integration.responseRule.reason"] = JsonSerializer.SerializeToElement(result.ResponseRuleEvaluation.Reason);
+            currentData["_integration.responseRule.targetPath"] = JsonSerializer.SerializeToElement(result.ResponseRuleEvaluation.TargetPath);
+            currentData["_integration.responseRule.expectedType"] = JsonSerializer.SerializeToElement(result.ResponseRuleEvaluation.ExpectedType);
+            currentData["_integration.responseRule.attemptCount"] = JsonSerializer.SerializeToElement(result.ResponseRuleEvaluation.AttemptCount);
+
+            if (result.ResponseRuleEvaluation.MaxAttempts.HasValue)
+            {
+                currentData["_integration.responseRule.maxAttempts"] = JsonSerializer.SerializeToElement(result.ResponseRuleEvaluation.MaxAttempts.Value);
+            }
+
+            if (result.ResponseRuleEvaluation.RetryIntervalMinutes.HasValue)
+            {
+                currentData["_integration.responseRule.retryIntervalMinutes"] = JsonSerializer.SerializeToElement(result.ResponseRuleEvaluation.RetryIntervalMinutes.Value);
+            }
+
+            if (result.ResponseRuleEvaluation.NextAttemptAtUtc.HasValue)
+            {
+                currentData["_integration.responseRule.nextAttemptAtUtc"] = JsonSerializer.SerializeToElement(result.ResponseRuleEvaluation.NextAttemptAtUtc.Value);
+            }
         }
 
         if (result.AwaitingData)
@@ -1118,21 +1315,9 @@ internal sealed class InstanceAutomationService(
         TimeZoneInfo timeZone,
         Dictionary<string, JsonElement>? currentData = null)
     {
-        if (config.RetryOnEmptyArray
-            && config.EmptyArrayRetryMinutes.HasValue
-            && currentData is not null
-            && currentData.TryGetValue("_integration.awaitingData", out var awaitingData)
-            && awaitingData.ValueKind == JsonValueKind.True)
+        if (currentData is not null && TryGetWaitingRuleNextAttempt(currentData, out var nextAttemptAtUtc))
         {
-            var lastAttemptAt = db.IntegrationAttempts
-                .AsNoTracking()
-                .Where(x => x.FlowInstanceId == instanceId && x.FlowStepId == stepId && x.TriggerType == IntegrationTriggerType.Runtime)
-                .OrderByDescending(x => x.CreatedAt)
-                .Select(x => (DateTime?)x.CreatedAt)
-                .FirstOrDefault();
-
-            var reference = lastAttemptAt ?? stepStartedAtUtc ?? DateTime.UtcNow;
-            return DateTime.UtcNow >= reference.AddMinutes(config.EmptyArrayRetryMinutes.Value);
+            return DateTime.UtcNow >= nextAttemptAtUtc;
         }
 
         if (string.Equals(config.ScheduleMode, "manual", StringComparison.OrdinalIgnoreCase))
@@ -1141,6 +1326,24 @@ internal sealed class InstanceAutomationService(
         }
 
         return ScheduleRuntimeHelper.IsDue(config, null, stepStartedAtUtc ?? DateTime.UtcNow, DateTime.UtcNow, timeZone: timeZone);
+    }
+
+    private static bool TryGetWaitingRuleNextAttempt(Dictionary<string, JsonElement> data, out DateTime nextAttemptAtUtc)
+    {
+        nextAttemptAtUtc = default;
+        if (!data.TryGetValue("_integration.responseRule.status", out var status)
+            || !string.Equals(status.ToString(), "waiting", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (data.TryGetValue("_integration.responseRule.nextAttemptAtUtc", out var nextAttempt)
+            && DateTime.TryParse(nextAttempt.ToString(), out nextAttemptAtUtc))
+        {
+            return true;
+        }
+
+        return false;
     }
 }
 
@@ -1197,8 +1400,7 @@ internal sealed class ApiQueryWorker(
             var currentData = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(current?.DataJson ?? "{}") ?? [];
             var isApiQuery = current?.FlowStep.Type == StepType.ApiQuery;
             var isApiSendAwaitingData = current?.FlowStep.Type == StepType.ApiSend
-                && currentData.TryGetValue("_integration.awaitingData", out var awaitingData)
-                && awaitingData.ValueKind == JsonValueKind.True;
+                && TryGetWaitingRuleNextAttempt(currentData, out _);
 
             if (current is null || (!isApiQuery && !isApiSendAwaitingData))
             {
@@ -1227,21 +1429,9 @@ internal sealed class ApiQueryWorker(
         TimeZoneInfo timeZone,
         Dictionary<string, JsonElement>? currentData = null)
     {
-        if (config.RetryOnEmptyArray
-            && config.EmptyArrayRetryMinutes.HasValue
-            && currentData is not null
-            && currentData.TryGetValue("_integration.awaitingData", out var awaitingData)
-            && awaitingData.ValueKind == JsonValueKind.True)
+        if (currentData is not null && TryGetWaitingRuleNextAttempt(currentData, out var nextAttemptAtUtc))
         {
-            var lastAttemptAt = db.IntegrationAttempts
-                .AsNoTracking()
-                .Where(x => x.FlowInstanceId == instanceId && x.FlowStepId == stepId && x.TriggerType == IntegrationTriggerType.Runtime)
-                .OrderByDescending(x => x.CreatedAt)
-                .Select(x => (DateTime?)x.CreatedAt)
-                .FirstOrDefault();
-
-            var reference = lastAttemptAt ?? stepStartedAtUtc ?? DateTime.UtcNow;
-            return DateTime.UtcNow >= reference.AddMinutes(config.EmptyArrayRetryMinutes.Value);
+            return DateTime.UtcNow >= nextAttemptAtUtc;
         }
 
         if (string.Equals(config.ScheduleMode, "manual", StringComparison.OrdinalIgnoreCase))
@@ -1250,6 +1440,24 @@ internal sealed class ApiQueryWorker(
         }
 
         return ScheduleRuntimeHelper.IsDue(config, null, stepStartedAtUtc ?? DateTime.UtcNow, DateTime.UtcNow, timeZone: timeZone);
+    }
+
+    private static bool TryGetWaitingRuleNextAttempt(Dictionary<string, JsonElement> data, out DateTime nextAttemptAtUtc)
+    {
+        nextAttemptAtUtc = default;
+        if (!data.TryGetValue("_integration.responseRule.status", out var status)
+            || !string.Equals(status.ToString(), "waiting", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (data.TryGetValue("_integration.responseRule.nextAttemptAtUtc", out var nextAttempt)
+            && DateTime.TryParse(nextAttempt.ToString(), out nextAttemptAtUtc))
+        {
+            return true;
+        }
+
+        return false;
     }
 }
 

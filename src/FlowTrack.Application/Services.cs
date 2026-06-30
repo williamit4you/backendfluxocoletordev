@@ -306,7 +306,8 @@ public sealed class FlowManagementService(
             result.Method,
             result.ResponsePreview,
             result.ErrorMessage,
-            result.MappedData?.ToDictionary(x => x.Key, x => x.Value.ToString()));
+            result.MappedData?.ToDictionary(x => x.Key, x => x.Value.ToString()),
+            result.ResponseRuleEvaluation);
     }
 
     private IQueryable<FlowDefinition> LoadFlows()
@@ -457,19 +458,24 @@ public sealed class FlowManagementService(
             throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' precisa de uma expressao cron valida com 5 partes. Exemplo: '*/30 * * * *'."] });
         }
 
-        var emptyArrayAction = NormalizeEmptyArrayAction(step.ApiConfig);
-        if (emptyArrayAction == "retry")
+        var responseRule = NormalizeResponseRule(step.ApiConfig);
+        if (responseRule.Enabled && responseRule.EmptyBehavior == "retry")
         {
             if (step.Type != StepType.ApiQuery && step.Type != StepType.ApiSend)
             {
                 throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' so pode usar a regra de retorno vazio em API envio ou API consulta."] });
             }
 
-            var retryMinutes = step.ApiConfig.EmptyArrayRetryMinutes ?? 0;
+            var retryMinutes = responseRule.RetryIntervalMinutes ?? 0;
             if (retryMinutes < 1 || retryMinutes > 10080)
             {
                 throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' precisa ter intervalo de nova consulta entre 1 e 10080 minutos quando a resposta vier vazia."] });
             }
+        }
+
+        if (responseRule.Enabled && responseRule.MaxAttempts is < 1 or > 1000)
+        {
+            throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' precisa ter limite de tentativas entre 1 e 1000 na regra de retorno."] });
         }
     }
 
@@ -495,7 +501,7 @@ public sealed class FlowManagementService(
             assist = new StepScheduleAssistDto(null, null, "Execucao manual, sem agendamento automatico.");
         }
 
-        var emptyArrayAction = NormalizeEmptyArrayAction(config);
+        var responseRule = NormalizeResponseRule(config);
 
         return config with
         {
@@ -511,26 +517,55 @@ public sealed class FlowManagementService(
             ScheduleAssist = assist,
             Headers = config.Headers?.Where(x => !string.IsNullOrWhiteSpace(x.Name) && !string.IsNullOrWhiteSpace(x.Value)).Select(x => new RequestHeaderDto(x.Name.Trim(), x.Value.Trim())).ToList(),
             BodyTemplate = string.IsNullOrWhiteSpace(config.BodyTemplate) ? null : config.BodyTemplate.Trim(),
-            RetryOnEmptyArray = emptyArrayAction == "retry",
-            EmptyArrayRetryMinutes = emptyArrayAction == "retry"
-                ? Math.Clamp(config.EmptyArrayRetryMinutes ?? 3, 1, 10080)
+            RetryOnEmptyArray = responseRule.Enabled && responseRule.EmptyBehavior == "retry",
+            EmptyArrayRetryMinutes = responseRule.Enabled && responseRule.EmptyBehavior == "retry"
+                ? responseRule.RetryIntervalMinutes
                 : null,
-            EmptyArrayAction = emptyArrayAction
+            EmptyArrayAction = responseRule.Enabled ? responseRule.EmptyBehavior : "advance",
+            ResponseRule = responseRule
         };
     }
 
-    private static string NormalizeEmptyArrayAction(StepApiConfigDto config)
+    private static ResponseRuleDto NormalizeResponseRule(StepApiConfigDto config)
     {
-        if (!string.IsNullOrWhiteSpace(config.EmptyArrayAction))
-        {
-            var normalized = config.EmptyArrayAction.Trim().ToLowerInvariant();
-            if (normalized is "advance" or "retry")
-            {
-                return normalized;
-            }
-        }
+        var source = config.ResponseRule;
+        var enabled = source?.Enabled ?? config.RetryOnEmptyArray;
+        var emptyBehavior = NormalizeRuleBehavior(source?.EmptyBehavior ?? config.EmptyArrayAction ?? (config.RetryOnEmptyArray ? "retry" : "advance"), "advance");
+        var nonEmptyBehavior = NormalizeRuleBehavior(source?.NonEmptyBehavior ?? "advance", "advance");
+        var failureBehavior = NormalizeRuleBehavior(source?.FailureBehavior ?? "fail", "fail");
+        var expectedType = NormalizeExpectedType(source?.ExpectedType ?? "array");
+        var targetPath = string.IsNullOrWhiteSpace(source?.TargetPath) ? "$" : source!.TargetPath!.Trim();
+        int? retryInterval = emptyBehavior == "retry"
+            ? Math.Clamp(source?.RetryIntervalMinutes ?? config.EmptyArrayRetryMinutes ?? 3, 1, 10080)
+            : null;
+        int? maxAttempts = emptyBehavior == "retry"
+            ? Math.Clamp(source?.MaxAttempts ?? 20, 1, 1000)
+            : source?.MaxAttempts;
 
-        return config.RetryOnEmptyArray ? "retry" : "advance";
+        return new ResponseRuleDto(
+            enabled,
+            targetPath,
+            expectedType,
+            emptyBehavior,
+            nonEmptyBehavior,
+            retryInterval,
+            maxAttempts,
+            failureBehavior,
+            string.IsNullOrWhiteSpace(source?.Description) ? null : source.Description.Trim());
+    }
+
+    private static string NormalizeRuleBehavior(string? value, string fallback)
+    {
+        var normalized = value?.Trim().ToLowerInvariant();
+        return normalized is "advance" or "retry" or "fail" ? normalized : fallback;
+    }
+
+    private static string NormalizeExpectedType(string? value)
+    {
+        var normalized = value?.Trim().ToLowerInvariant();
+        return normalized is "array" or "object" or "string" or "number" or "boolean" or "any"
+            ? normalized
+            : "array";
     }
 
     private static bool TryParseIntervalMinutes(string? value, out int minutes)
