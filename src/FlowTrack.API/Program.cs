@@ -12,7 +12,7 @@ builder.Services.AddSwaggerGen(options =>
 {
     options.SwaggerDoc("v1", new OpenApiInfo
     {
-        Title = "FlowTrack API",
+        Title = "It4you Track API",
         Version = "v1",
         Description = "API de acompanhamento de fluxos operacionais."
     });
