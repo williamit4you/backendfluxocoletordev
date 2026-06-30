@@ -1621,7 +1621,7 @@ public sealed class InstanceManagementService(
                                 f.Options.OrderBy(o => o.Order).Select(o => new FieldOptionDto(o.Id, o.Label, o.Value, o.Order, o.Key, o.Type, o.Mask, o.Required)).ToList(),
                                 f.Type is FieldType.Attachment or FieldType.Photo or FieldType.Document
                                     ? string.Join(", ", (storedFileDtos.TryGetValue(x.Id, out var uploadFiles) ? uploadFiles.Where(file => string.Equals(file.FieldKey, f.Key, StringComparison.OrdinalIgnoreCase)).Select(file => file.FileName) : Enumerable.Empty<string>()).ToArray())
-                                    : rawData.TryGetValue(f.Key, out var fieldValue) ? fieldValue.ToString() : null))
+                                    : enrichedData.TryGetValue(f.Key, out var fieldValue) ? fieldValue.ToString() : null))
                             .ToList(),
                         integrationAttemptsByStep.TryGetValue(x.FlowStepId, out var attempts) ? attempts : []);
                 })
