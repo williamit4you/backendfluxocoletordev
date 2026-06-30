@@ -174,11 +174,11 @@ internal sealed class IntegrationExecutionService(
                 ? MapResponseData(config, responseText)
                 : null;
             var awaitingData = success
-                && step.Type == StepType.ApiQuery
+                && (step.Type == StepType.ApiQuery || step.Type == StepType.ApiSend)
                 && config.RetryOnEmptyArray
                 && IsEmptyArrayResponse(responseText);
             var awaitingDataMessage = awaitingData
-                ? $"Consulta retornou lista vazia. Nova tentativa em {config.EmptyArrayRetryMinutes ?? 3} minuto(s)."
+                ? $"Retorno vazio detectado. Nova tentativa em {config.EmptyArrayRetryMinutes ?? 3} minuto(s)."
                 : null;
 
             if (success && (step.Type == StepType.ApiQuery || step.Type == StepType.ApiSend))
@@ -186,7 +186,7 @@ internal sealed class IntegrationExecutionService(
                 if (awaitingData)
                 {
                     logger.LogInformation(
-                        "Consulta retornou lista vazia e ficara aguardando novo resultado. StepId={StepId}, RetryAfterMinutes={RetryAfterMinutes}",
+                        "Retorno vazio detectado e a etapa ficara aguardando nova tentativa. StepId={StepId}, RetryAfterMinutes={RetryAfterMinutes}",
                         step.Id,
                         config.EmptyArrayRetryMinutes ?? 3);
                 }
@@ -998,7 +998,7 @@ internal sealed class InstanceAutomationService(
                 return;
             }
 
-            if (stepType == StepType.ApiQuery && result.AwaitingData)
+            if ((stepType == StepType.ApiQuery || stepType == StepType.ApiSend) && result.AwaitingData)
             {
                 current.Notes = result.AwaitingDataMessage;
                 item.UpdatedAt = DateTime.UtcNow;
@@ -1194,7 +1194,13 @@ internal sealed class ApiQueryWorker(
         foreach (var instance in candidates)
         {
             var current = instance.StepExecutions.SingleOrDefault(x => x.Status == StepStatus.InProgress || x.Status == StepStatus.Failed);
-            if (current is null || current.FlowStep.Type != StepType.ApiQuery)
+            var currentData = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(current?.DataJson ?? "{}") ?? [];
+            var isApiQuery = current?.FlowStep.Type == StepType.ApiQuery;
+            var isApiSendAwaitingData = current?.FlowStep.Type == StepType.ApiSend
+                && currentData.TryGetValue("_integration.awaitingData", out var awaitingData)
+                && awaitingData.ValueKind == JsonValueKind.True;
+
+            if (current is null || (!isApiQuery && !isApiSendAwaitingData))
             {
                 continue;
             }
@@ -1202,7 +1208,6 @@ internal sealed class ApiQueryWorker(
             var config = string.IsNullOrWhiteSpace(current.FlowStep.ConfigurationJson)
                 ? null
                 : JsonSerializer.Deserialize<StepApiConfigDto>(current.FlowStep.ConfigurationJson);
-            var currentData = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(current.DataJson) ?? [];
 
             if (config is null || !IsApiQueryAttemptDue(config, db, instance.Id, current.FlowStepId, current.StartedAt, scheduleTimeZone, currentData))
             {

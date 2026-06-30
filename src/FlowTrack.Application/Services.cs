@@ -460,9 +460,9 @@ public sealed class FlowManagementService(
         var emptyArrayAction = NormalizeEmptyArrayAction(step.ApiConfig);
         if (emptyArrayAction == "retry")
         {
-            if (step.Type != StepType.ApiQuery)
+            if (step.Type != StepType.ApiQuery && step.Type != StepType.ApiSend)
             {
-                throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' so pode usar a regra de retorno vazio em API consulta."] });
+                throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' so pode usar a regra de retorno vazio em API envio ou API consulta."] });
             }
 
             var retryMinutes = step.ApiConfig.EmptyArrayRetryMinutes ?? 0;
