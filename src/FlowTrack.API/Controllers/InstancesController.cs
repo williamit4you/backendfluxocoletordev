@@ -183,6 +183,27 @@ public sealed class InstancesController(IInstanceManagementService instances) : 
         }
     }
 
+    [HttpPost("{id:guid}/steps/{stepExecutionId:guid}/cancel-waiting")]
+    public async Task<ActionResult<InstanceDto>> CancelWaitingStep(Guid id, Guid stepExecutionId)
+    {
+        try
+        {
+            return Ok(await instances.CancelWaitingStepAsync(id, stepExecutionId, TryGetCurrentUserId(), HttpContext.RequestAborted));
+        }
+        catch (AppNotFoundException)
+        {
+            return NotFound();
+        }
+        catch (AppConflictException ex)
+        {
+            return Conflict(new { message = ex.Message });
+        }
+        catch (AppForbiddenException)
+        {
+            return Forbid();
+        }
+    }
+
     private Guid? TryGetCurrentUserId()
     {
         return Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier) ?? User.FindFirstValue("sub"), out var userId)

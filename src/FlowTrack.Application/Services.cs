@@ -1328,6 +1328,69 @@ public sealed class InstanceManagementService(
         return await ToDtoAsync(reloaded, cancellationToken);
     }
 
+    public async Task<InstanceDto> CancelWaitingStepAsync(Guid id, Guid stepExecutionId, Guid? actorUserId, CancellationToken cancellationToken)
+    {
+        var item = await LoadInstance().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
+            ?? throw new AppNotFoundException("Execucao nao encontrada.");
+
+        if (!CanViewInstance(item, actorUserId))
+        {
+            throw new AppForbiddenException();
+        }
+
+        var target = item.StepExecutions.SingleOrDefault(x => x.Id == stepExecutionId)
+            ?? throw new AppNotFoundException("Etapa da execucao nao encontrada.");
+
+        if (target.FlowStep.Type != StepType.ApiSend && target.FlowStep.Type != StepType.ApiQuery)
+        {
+            throw new AppConflictException("Apenas etapas de integracao podem cancelar a espera por retorno.");
+        }
+
+        if (target.Status != StepStatus.InProgress)
+        {
+            throw new AppConflictException("Somente a etapa automatica atual em andamento pode ter a espera cancelada.");
+        }
+
+        var current = item.StepExecutions.SingleOrDefault(x => x.Status == StepStatus.InProgress);
+        if (current?.Id != target.Id)
+        {
+            throw new AppConflictException("Somente a etapa automatica atual em andamento pode ter a espera cancelada.");
+        }
+
+        var currentData = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(item.DataJson) ?? [];
+        var ruleStatus = currentData.TryGetValue("_integration.responseRule.status", out var ruleStatusValue)
+            ? ruleStatusValue.GetString()
+            : null;
+        var isAwaitingData = string.Equals(ruleStatus, "waiting", StringComparison.OrdinalIgnoreCase)
+            || (currentData.TryGetValue("_integration.awaitingData", out var awaitingDataValue)
+                && (awaitingDataValue.ValueKind == JsonValueKind.True
+                    || string.Equals(awaitingDataValue.ToString(), "true", StringComparison.OrdinalIgnoreCase)));
+
+        if (!isAwaitingData)
+        {
+            throw new AppConflictException("Esta etapa nao esta aguardando um novo retorno automatico para ser cancelada.");
+        }
+
+        currentData.Remove("_integration.awaitingData");
+        currentData.Remove("_integration.awaitingDataMessage");
+        currentData.Remove("_integration.emptyResultRetryMinutes");
+        currentData.Remove("_integration.responseRule.nextAttemptAtUtc");
+        currentData["_integration.responseRule.status"] = JsonSerializer.SerializeToElement("cancelled");
+        currentData["_integration.responseRule.reason"] = JsonSerializer.SerializeToElement("Aguarda de retorno cancelada manualmente. Nenhuma nova consulta automatica sera executada.");
+
+        var now = DateTime.UtcNow;
+        target.Status = StepStatus.Failed;
+        target.Notes = "Aguarda de retorno cancelada manualmente.";
+        target.DataJson = JsonSerializer.Serialize(currentData);
+        item.DataJson = JsonSerializer.Serialize(currentData);
+        item.UpdatedAt = now;
+
+        await db.SaveChangesAsync(cancellationToken);
+
+        var reloaded = await LoadInstance().AsNoTracking().SingleAsync(x => x.Id == id, cancellationToken);
+        return await ToDtoAsync(reloaded, cancellationToken);
+    }
+
     private IQueryable<FlowInstance> LoadInstance()
     {
         return db.Instances
