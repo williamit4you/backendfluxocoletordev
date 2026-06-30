@@ -457,7 +457,8 @@ public sealed class FlowManagementService(
             throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' precisa de uma expressao cron valida com 5 partes. Exemplo: '*/30 * * * *'."] });
         }
 
-        if (step.ApiConfig.RetryOnEmptyArray)
+        var emptyArrayAction = NormalizeEmptyArrayAction(step.ApiConfig);
+        if (emptyArrayAction == "retry")
         {
             if (step.Type != StepType.ApiQuery)
             {
@@ -494,6 +495,8 @@ public sealed class FlowManagementService(
             assist = new StepScheduleAssistDto(null, null, "Execucao manual, sem agendamento automatico.");
         }
 
+        var emptyArrayAction = NormalizeEmptyArrayAction(config);
+
         return config with
         {
             Url = string.IsNullOrWhiteSpace(config.Url) ? null : config.Url.Trim(),
@@ -508,11 +511,26 @@ public sealed class FlowManagementService(
             ScheduleAssist = assist,
             Headers = config.Headers?.Where(x => !string.IsNullOrWhiteSpace(x.Name) && !string.IsNullOrWhiteSpace(x.Value)).Select(x => new RequestHeaderDto(x.Name.Trim(), x.Value.Trim())).ToList(),
             BodyTemplate = string.IsNullOrWhiteSpace(config.BodyTemplate) ? null : config.BodyTemplate.Trim(),
-            RetryOnEmptyArray = config.RetryOnEmptyArray,
-            EmptyArrayRetryMinutes = config.RetryOnEmptyArray
+            RetryOnEmptyArray = emptyArrayAction == "retry",
+            EmptyArrayRetryMinutes = emptyArrayAction == "retry"
                 ? Math.Clamp(config.EmptyArrayRetryMinutes ?? 3, 1, 10080)
-                : null
+                : null,
+            EmptyArrayAction = emptyArrayAction
         };
+    }
+
+    private static string NormalizeEmptyArrayAction(StepApiConfigDto config)
+    {
+        if (!string.IsNullOrWhiteSpace(config.EmptyArrayAction))
+        {
+            var normalized = config.EmptyArrayAction.Trim().ToLowerInvariant();
+            if (normalized is "advance" or "retry")
+            {
+                return normalized;
+            }
+        }
+
+        return config.RetryOnEmptyArray ? "retry" : "advance";
     }
 
     private static bool TryParseIntervalMinutes(string? value, out int minutes)
