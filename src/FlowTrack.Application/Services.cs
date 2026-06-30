@@ -456,6 +456,20 @@ public sealed class FlowManagementService(
         {
             throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' precisa de uma expressao cron valida com 5 partes. Exemplo: '*/30 * * * *'."] });
         }
+
+        if (step.ApiConfig.RetryOnEmptyArray)
+        {
+            if (step.Type != StepType.ApiQuery)
+            {
+                throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' so pode usar a regra de retorno vazio em API consulta."] });
+            }
+
+            var retryMinutes = step.ApiConfig.EmptyArrayRetryMinutes ?? 0;
+            if (retryMinutes < 1 || retryMinutes > 10080)
+            {
+                throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' precisa ter intervalo de nova consulta entre 1 e 10080 minutos quando a resposta vier vazia."] });
+            }
+        }
     }
 
     private static StepApiConfigDto NormalizeApiConfig(StepApiConfigDto config)
@@ -493,7 +507,11 @@ public sealed class FlowManagementService(
             BodyMappings = config.BodyMappings?.Where(x => !string.IsNullOrWhiteSpace(x.TargetKey) && !string.IsNullOrWhiteSpace(x.SourceReference)).Select(x => new BodyFieldMappingDto(x.TargetKey.Trim(), x.SourceReference.Trim())).ToList(),
             ScheduleAssist = assist,
             Headers = config.Headers?.Where(x => !string.IsNullOrWhiteSpace(x.Name) && !string.IsNullOrWhiteSpace(x.Value)).Select(x => new RequestHeaderDto(x.Name.Trim(), x.Value.Trim())).ToList(),
-            BodyTemplate = string.IsNullOrWhiteSpace(config.BodyTemplate) ? null : config.BodyTemplate.Trim()
+            BodyTemplate = string.IsNullOrWhiteSpace(config.BodyTemplate) ? null : config.BodyTemplate.Trim(),
+            RetryOnEmptyArray = config.RetryOnEmptyArray,
+            EmptyArrayRetryMinutes = config.RetryOnEmptyArray
+                ? Math.Clamp(config.EmptyArrayRetryMinutes ?? 3, 1, 10080)
+                : null
         };
     }
 

@@ -117,7 +117,7 @@ internal sealed class IntegrationExecutionService(
 
         if (config is null || string.IsNullOrWhiteSpace(config.Url))
         {
-            return await SaveAttemptAsync(step, triggerType, "GET", "", false, null, 0, null, null, null, "Etapa sem configuracao de integracao.", null, instance, stepExecution, cancellationToken);
+            return await SaveAttemptAsync(step, triggerType, "GET", "", false, null, 0, null, null, null, "Etapa sem configuracao de integracao.", null, false, null, null, instance, stepExecution, cancellationToken);
         }
 
         var method = ResolveMethod(step.Type, config.Method);
@@ -131,7 +131,7 @@ internal sealed class IntegrationExecutionService(
         if (validationError is not null)
         {
             logger.LogWarning("Destino de integracao bloqueado para a etapa {StepId}: {Error}", step.Id, validationError);
-            return await SaveAttemptAsync(step, triggerType, method, SanitizeUrl(resolvedUrl), false, null, 0, null, null, null, validationError, null, instance, stepExecution, cancellationToken);
+            return await SaveAttemptAsync(step, triggerType, method, SanitizeUrl(resolvedUrl), false, null, 0, null, null, null, validationError, null, false, null, null, instance, stepExecution, cancellationToken);
         }
 
         using var request = new HttpRequestMessage(new HttpMethod(method), resolvedUrl);
@@ -173,10 +173,24 @@ internal sealed class IntegrationExecutionService(
             var mappedData = success && (step.Type == StepType.ApiQuery || step.Type == StepType.ApiSend)
                 ? MapResponseData(config, responseText)
                 : null;
+            var awaitingData = success
+                && step.Type == StepType.ApiQuery
+                && config.RetryOnEmptyArray
+                && IsEmptyArrayResponse(responseText);
+            var awaitingDataMessage = awaitingData
+                ? $"Consulta retornou lista vazia. Nova tentativa em {config.EmptyArrayRetryMinutes ?? 3} minuto(s)."
+                : null;
 
             if (success && (step.Type == StepType.ApiQuery || step.Type == StepType.ApiSend))
             {
-                if (mappedData is null || mappedData.Count == 0)
+                if (awaitingData)
+                {
+                    logger.LogInformation(
+                        "Consulta retornou lista vazia e ficara aguardando novo resultado. StepId={StepId}, RetryAfterMinutes={RetryAfterMinutes}",
+                        step.Id,
+                        config.EmptyArrayRetryMinutes ?? 3);
+                }
+                else if (mappedData is null || mappedData.Count == 0)
                 {
                     logger.LogWarning(
                         "Nenhum valor foi capturado no mapeamento da resposta. StepId={StepId}, Tipo={StepType}, ResponseMappings={ResponseMappings}",
@@ -209,6 +223,9 @@ internal sealed class IntegrationExecutionService(
                 preview,
                 success ? null : $"Resposta HTTP {(int)response.StatusCode}.",
                 mappedData,
+                awaitingData,
+                awaitingDataMessage,
+                awaitingData ? config.EmptyArrayRetryMinutes ?? 3 : null,
                 instance,
                 stepExecution,
                 cancellationToken);
@@ -228,6 +245,9 @@ internal sealed class IntegrationExecutionService(
                 requestBodyPreview,
                 null,
                 Truncate(ex.Message, 400),
+                null,
+                false,
+                null,
                 null,
                 instance,
                 stepExecution,
@@ -423,6 +443,17 @@ internal sealed class IntegrationExecutionService(
         }
 
         return mapped.Count == 0 ? null : mapped;
+    }
+
+    private static bool IsEmptyArrayResponse(string responseText)
+    {
+        if (string.IsNullOrWhiteSpace(responseText))
+        {
+            return false;
+        }
+
+        using var document = JsonDocument.Parse(responseText);
+        return document.RootElement.ValueKind == JsonValueKind.Array && document.RootElement.GetArrayLength() == 0;
     }
 
     private static string? BuildRequestHeadersPreview(HttpRequestMessage request)
@@ -752,6 +783,9 @@ internal sealed class IntegrationExecutionService(
         string? preview,
         string? error,
         Dictionary<string, JsonElement>? mappedData,
+        bool awaitingData,
+        string? awaitingDataMessage,
+        int? retryAfterMinutes,
         FlowInstance? instance,
         StepExecution? stepExecution,
         CancellationToken cancellationToken)
@@ -792,7 +826,7 @@ internal sealed class IntegrationExecutionService(
             ", cancellationToken);
         }
 
-        return new IntegrationExecutionResult(success, statusCode, durationMs, attempt.Url, method, attempt.RequestHeaders, attempt.RequestBody, attempt.ResponsePreview, attempt.ErrorMessage, mappedData);
+        return new IntegrationExecutionResult(success, statusCode, durationMs, attempt.Url, method, attempt.RequestHeaders, attempt.RequestBody, attempt.ResponsePreview, attempt.ErrorMessage, mappedData, awaitingData, awaitingDataMessage, retryAfterMinutes);
     }
 }
 
@@ -934,8 +968,7 @@ internal sealed class InstanceAutomationService(
                 var scheduleTimeZone = ScheduleRuntimeHelper.ResolveTimeZone(appConfig["Scheduling:TimeZoneId"]);
 
                 if (config is not null
-                    && !string.Equals(config.ScheduleMode, "manual", StringComparison.OrdinalIgnoreCase)
-                    && !ScheduleRuntimeHelper.IsDue(config, null, current.StartedAt ?? DateTime.UtcNow, DateTime.UtcNow, timeZone: scheduleTimeZone))
+                    && !IsApiQueryAttemptDue(config, db, item.Id, current.FlowStepId, current.StartedAt, scheduleTimeZone, currentData))
                 {
                     return;
                 }
@@ -960,6 +993,14 @@ internal sealed class InstanceAutomationService(
                 logger.LogWarning("Falha de integracao na instancia {InstanceId}, etapa {StepId}: {Error}", item.Id, current.FlowStepId, result.ErrorMessage);
                 current.Status = StepStatus.Failed;
                 current.Notes = result.ErrorMessage ?? "Falha na integracao.";
+                item.UpdatedAt = DateTime.UtcNow;
+                await db.SaveChangesAsync(cancellationToken);
+                return;
+            }
+
+            if (stepType == StepType.ApiQuery && result.AwaitingData)
+            {
+                current.Notes = result.AwaitingDataMessage;
                 item.UpdatedAt = DateTime.UtcNow;
                 await db.SaveChangesAsync(cancellationToken);
                 return;
@@ -1011,6 +1052,11 @@ internal sealed class InstanceAutomationService(
 
     private static void MergeIntegrationResultIntoExecutionData(Dictionary<string, JsonElement> currentData, IntegrationExecutionResult result)
     {
+        currentData.Remove("_integration.mappingWarning");
+        currentData.Remove("_integration.mappingResult");
+        currentData.Remove("_integration.awaitingData");
+        currentData.Remove("_integration.awaitingDataMessage");
+        currentData.Remove("_integration.emptyResultRetryMinutes");
         currentData["_integration.success"] = JsonSerializer.SerializeToElement(result.Success);
         currentData["_integration.method"] = JsonSerializer.SerializeToElement(result.Method);
         currentData["_integration.url"] = JsonSerializer.SerializeToElement(result.Url);
@@ -1042,7 +1088,17 @@ internal sealed class InstanceAutomationService(
             currentData["_integration.errorMessage"] = JsonSerializer.SerializeToElement(result.ErrorMessage);
         }
 
-        if (result.MappedData is null || result.MappedData.Count == 0)
+        if (result.AwaitingData)
+        {
+            currentData["_integration.awaitingData"] = JsonSerializer.SerializeToElement(true);
+            currentData["_integration.awaitingDataMessage"] = JsonSerializer.SerializeToElement(result.AwaitingDataMessage ?? "Consulta aguardando retorno com conteudo.");
+
+            if (result.RetryAfterMinutes.HasValue)
+            {
+                currentData["_integration.emptyResultRetryMinutes"] = JsonSerializer.SerializeToElement(result.RetryAfterMinutes.Value);
+            }
+        }
+        else if (result.MappedData is null || result.MappedData.Count == 0)
         {
             currentData["_integration.mappingWarning"] = JsonSerializer.SerializeToElement("Nenhum valor foi capturado no mapeamento da resposta.");
         }
@@ -1051,6 +1107,40 @@ internal sealed class InstanceAutomationService(
             currentData["_integration.mappingResult"] = JsonSerializer.SerializeToElement(
                 result.MappedData.ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.OrdinalIgnoreCase));
         }
+    }
+
+    private static bool IsApiQueryAttemptDue(
+        StepApiConfigDto config,
+        AppDbContext db,
+        Guid instanceId,
+        Guid stepId,
+        DateTime? stepStartedAtUtc,
+        TimeZoneInfo timeZone,
+        Dictionary<string, JsonElement>? currentData = null)
+    {
+        if (config.RetryOnEmptyArray
+            && config.EmptyArrayRetryMinutes.HasValue
+            && currentData is not null
+            && currentData.TryGetValue("_integration.awaitingData", out var awaitingData)
+            && awaitingData.ValueKind == JsonValueKind.True)
+        {
+            var lastAttemptAt = db.IntegrationAttempts
+                .AsNoTracking()
+                .Where(x => x.FlowInstanceId == instanceId && x.FlowStepId == stepId && x.TriggerType == IntegrationTriggerType.Runtime)
+                .OrderByDescending(x => x.CreatedAt)
+                .Select(x => (DateTime?)x.CreatedAt)
+                .FirstOrDefault();
+
+            var reference = lastAttemptAt ?? stepStartedAtUtc ?? DateTime.UtcNow;
+            return DateTime.UtcNow >= reference.AddMinutes(config.EmptyArrayRetryMinutes.Value);
+        }
+
+        if (string.Equals(config.ScheduleMode, "manual", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return ScheduleRuntimeHelper.IsDue(config, null, stepStartedAtUtc ?? DateTime.UtcNow, DateTime.UtcNow, timeZone: timeZone);
     }
 }
 
@@ -1112,8 +1202,9 @@ internal sealed class ApiQueryWorker(
             var config = string.IsNullOrWhiteSpace(current.FlowStep.ConfigurationJson)
                 ? null
                 : JsonSerializer.Deserialize<StepApiConfigDto>(current.FlowStep.ConfigurationJson);
+            var currentData = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(current.DataJson) ?? [];
 
-            if (config is null || !IsDue(config, db, instance.Id, current.FlowStepId, current.StartedAt, scheduleTimeZone))
+            if (config is null || !IsApiQueryAttemptDue(config, db, instance.Id, current.FlowStepId, current.StartedAt, scheduleTimeZone, currentData))
             {
                 continue;
             }
@@ -1122,16 +1213,38 @@ internal sealed class ApiQueryWorker(
         }
     }
 
-    private static bool IsDue(StepApiConfigDto config, AppDbContext db, Guid instanceId, Guid stepId, DateTime? stepStartedAtUtc, TimeZoneInfo timeZone)
+    private static bool IsApiQueryAttemptDue(
+        StepApiConfigDto config,
+        AppDbContext db,
+        Guid instanceId,
+        Guid stepId,
+        DateTime? stepStartedAtUtc,
+        TimeZoneInfo timeZone,
+        Dictionary<string, JsonElement>? currentData = null)
     {
-        var lastAttemptAt = db.IntegrationAttempts
-            .AsNoTracking()
-            .Where(x => x.FlowInstanceId == instanceId && x.FlowStepId == stepId && x.TriggerType == IntegrationTriggerType.Runtime)
-            .OrderByDescending(x => x.CreatedAt)
-            .Select(x => (DateTime?)x.CreatedAt)
-            .FirstOrDefault();
-        var reference = lastAttemptAt ?? stepStartedAtUtc ?? DateTime.UtcNow;
-        return ScheduleRuntimeHelper.IsDue(config, lastAttemptAt, reference, DateTime.UtcNow, timeZone: timeZone);
+        if (config.RetryOnEmptyArray
+            && config.EmptyArrayRetryMinutes.HasValue
+            && currentData is not null
+            && currentData.TryGetValue("_integration.awaitingData", out var awaitingData)
+            && awaitingData.ValueKind == JsonValueKind.True)
+        {
+            var lastAttemptAt = db.IntegrationAttempts
+                .AsNoTracking()
+                .Where(x => x.FlowInstanceId == instanceId && x.FlowStepId == stepId && x.TriggerType == IntegrationTriggerType.Runtime)
+                .OrderByDescending(x => x.CreatedAt)
+                .Select(x => (DateTime?)x.CreatedAt)
+                .FirstOrDefault();
+
+            var reference = lastAttemptAt ?? stepStartedAtUtc ?? DateTime.UtcNow;
+            return DateTime.UtcNow >= reference.AddMinutes(config.EmptyArrayRetryMinutes.Value);
+        }
+
+        if (string.Equals(config.ScheduleMode, "manual", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return ScheduleRuntimeHelper.IsDue(config, null, stepStartedAtUtc ?? DateTime.UtcNow, DateTime.UtcNow, timeZone: timeZone);
     }
 }
 
