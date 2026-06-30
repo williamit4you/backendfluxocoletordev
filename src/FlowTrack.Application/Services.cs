@@ -1239,7 +1239,7 @@ public sealed class InstanceManagementService(
             ? "Etapa reprocessada manualmente."
             : result.ErrorMessage ?? "Falha no reprocessamento manual.";
 
-        if (result.Success && target.FlowStep.Type == StepType.ApiQuery && result.MappedData is not null)
+        if (result.Success && (target.FlowStep.Type == StepType.ApiQuery || target.FlowStep.Type == StepType.ApiSend) && result.MappedData is not null)
         {
             foreach (var mapped in result.MappedData)
             {

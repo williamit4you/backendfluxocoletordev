@@ -158,7 +158,7 @@ internal sealed class IntegrationExecutionService(
             var responseText = await response.Content.ReadAsStringAsync(cancellationToken);
             var preview = Truncate(responseText);
             var success = response.IsSuccessStatusCode;
-            var mappedData = success && step.Type == StepType.ApiQuery
+            var mappedData = success && (step.Type == StepType.ApiQuery || step.Type == StepType.ApiSend)
                 ? MapResponseData(config, responseText)
                 : null;
 
@@ -881,7 +881,7 @@ internal sealed class InstanceAutomationService(
             var result = await integrations.ExecuteAsync(item.FlowDefinition, current.FlowStep, currentData, cancellationToken, item, current, IntegrationTriggerType.Runtime);
             MergeIntegrationResultIntoExecutionData(currentData, result);
 
-            if (stepType == StepType.ApiQuery && result.MappedData is not null)
+            if ((stepType == StepType.ApiQuery || stepType == StepType.ApiSend) && result.MappedData is not null)
             {
                 foreach (var mapped in result.MappedData)
                 {
