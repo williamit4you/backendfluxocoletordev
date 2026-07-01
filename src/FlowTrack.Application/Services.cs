@@ -1,5 +1,7 @@
 using System.Text.Json;
+using System.Text;
 using System.Text.RegularExpressions;
+using System.Globalization;
 using FlowTrack.Domain;
 using Microsoft.EntityFrameworkCore;
 
@@ -1025,7 +1027,8 @@ public sealed class InstanceManagementService(
     IAppDbContext db,
     IInstanceAutomationService automation,
     IIntegrationExecutionService integrations,
-    IFileStorageService fileStorage) : IInstanceManagementService
+    IFileStorageService fileStorage,
+    IPdfExtractionService pdfExtraction) : IInstanceManagementService
 {
     public async Task<IReadOnlyList<InstanceDto>> GetAllAsync(Guid? flowId, string? status, string? search, Guid? actorUserId, CancellationToken cancellationToken)
     {
@@ -1254,12 +1257,26 @@ public sealed class InstanceManagementService(
             throw new AppValidationException(new Dictionary<string, string[]> { ["file"] = ["O campo de foto aceita apenas imagens."] });
         }
 
-        var uploaded = await fileStorage.SaveStepFileAsync(id, current.Id, normalizedFieldKey, fileName, contentType ?? "application/octet-stream", stream, isPhoto, actorUserId, cancellationToken);
+        await using var bufferedStream = new MemoryStream();
+        await stream.CopyToAsync(bufferedStream, cancellationToken);
+        bufferedStream.Position = 0;
+
+        var uploaded = await fileStorage.SaveStepFileAsync(id, current.Id, normalizedFieldKey, fileName, contentType ?? "application/octet-stream", bufferedStream, isPhoto, actorUserId, cancellationToken);
 
         var mergedData = MergeStepData(item, current, null);
         var existingFiles = ReadUploadedFiles(mergedData, normalizedFieldKey);
         existingFiles.Add(uploaded);
         mergedData[normalizedFieldKey] = JsonSerializer.SerializeToElement(existingFiles);
+
+        if (ShouldAutoExtractPdf(current.FlowStep, fileName, contentType))
+        {
+            bufferedStream.Position = 0;
+            var extraction = await pdfExtraction.ExtractAsync(bufferedStream, cancellationToken);
+            foreach (var entry in MapPdfFieldsToStepFields(current.FlowStep.Fields, extraction.Fields))
+            {
+                mergedData[entry.Key] = JsonSerializer.SerializeToElement(entry.Value);
+            }
+        }
 
         current.DataJson = JsonSerializer.Serialize(mergedData);
         item.DataJson = MergeInstanceData(item.DataJson, mergedData);
@@ -1536,6 +1553,210 @@ public sealed class InstanceManagementService(
 
         return stepData;
     }
+
+    private static bool ShouldAutoExtractPdf(FlowStep step, string fileName, string? contentType)
+    {
+        if (step.Type != StepType.Reader)
+        {
+            return false;
+        }
+
+        if (fileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return string.Equals(contentType, "application/pdf", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static Dictionary<string, string> MapPdfFieldsToStepFields(IEnumerable<StepField> fields, Dictionary<string, string> extractedFields)
+    {
+        var extractedEntries = extractedFields
+            .Select(entry => new ReaderExtractedEntry(entry.Key, entry.Value, ExpandReaderAliases(entry.Key)))
+            .ToList();
+
+        var mapped = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var field in fields)
+        {
+            if (field.Type is FieldType.Document or FieldType.Attachment or FieldType.Photo)
+            {
+                continue;
+            }
+
+            var candidates = BuildReaderCandidates(field);
+            var match = extractedEntries.FirstOrDefault(entry => entry.Aliases.Any(alias => candidates.Contains(alias)));
+            if (match is null || string.IsNullOrWhiteSpace(match.Value))
+            {
+                continue;
+            }
+
+            mapped[field.Key] = CoerceReaderValue(field, match.Value);
+        }
+
+        return mapped;
+    }
+
+    private static HashSet<string> BuildReaderCandidates(StepField field)
+    {
+        var candidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var source in new[] { field.Key, field.Label })
+        {
+            foreach (var alias in ExpandReaderAliases(source))
+            {
+                candidates.Add(alias);
+            }
+        }
+
+        return candidates;
+    }
+
+    private static HashSet<string> ExpandReaderAliases(string value)
+    {
+        var normalized = NormalizeReaderToken(value);
+        var aliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { normalized };
+
+        foreach (var group in ReaderAliasGroups)
+        {
+            if (!group.Contains(normalized, StringComparer.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            foreach (var alias in group)
+            {
+                aliases.Add(alias);
+            }
+        }
+
+        return aliases;
+    }
+
+    private static string NormalizeReaderToken(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var normalized = value.Normalize(NormalizationForm.FormD);
+        var builder = new System.Text.StringBuilder(normalized.Length);
+        foreach (var character in normalized)
+        {
+            if (CharUnicodeInfo.GetUnicodeCategory(character) == UnicodeCategory.NonSpacingMark)
+            {
+                continue;
+            }
+
+            if (char.IsLetterOrDigit(character))
+            {
+                builder.Append(char.ToLowerInvariant(character));
+            }
+        }
+
+        return builder.ToString();
+    }
+
+    private static string CoerceReaderValue(StepField field, string value)
+    {
+        var text = value.Trim();
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return string.Empty;
+        }
+
+        if (field.Type == FieldType.Date)
+        {
+            return ParseReaderDate(text);
+        }
+
+        if (field.Type == FieldType.Number)
+        {
+            return ParseReaderNumber(text);
+        }
+
+        return ApplyReaderMask(field.Mask, text);
+    }
+
+    private static string ParseReaderDate(string value)
+    {
+        var brDate = Regex.Match(value, @"^(\d{2})/(\d{2})/(\d{4})$");
+        if (brDate.Success)
+        {
+            return $"{brDate.Groups[3].Value}-{brDate.Groups[2].Value}-{brDate.Groups[1].Value}";
+        }
+
+        var isoDate = Regex.Match(value, @"^(\d{4})-(\d{2})-(\d{2})");
+        if (isoDate.Success)
+        {
+            return $"{isoDate.Groups[1].Value}-{isoDate.Groups[2].Value}-{isoDate.Groups[3].Value}";
+        }
+
+        return value;
+    }
+
+    private static string ParseReaderNumber(string value)
+    {
+        var trimmed = value.Trim();
+        if (Regex.IsMatch(trimmed, @"^-?\d+(\.\d+)?$"))
+        {
+            return trimmed;
+        }
+
+        var normalized = trimmed.Replace(".", string.Empty).Replace(",", ".");
+        return Regex.IsMatch(normalized, @"^-?\d+(\.\d+)?$") ? normalized : trimmed;
+    }
+
+    private static string ApplyReaderMask(string? mask, string value)
+    {
+        if (string.IsNullOrWhiteSpace(mask))
+        {
+            return value;
+        }
+
+        var digits = Regex.Replace(value, @"\D+", string.Empty);
+        return mask.Trim().ToLowerInvariant() switch
+        {
+            "cep" => Regex.Replace(digits, @"^(\d{0,5})(\d{0,3}).*$", m => string.IsNullOrEmpty(m.Groups[2].Value) ? m.Groups[1].Value : $"{m.Groups[1].Value}-{m.Groups[2].Value}"),
+            "cnpj" => Regex.Replace(digits, @"^(\d{0,2})(\d{0,3})(\d{0,3})(\d{0,4})(\d{0,2}).*$", m => JoinReaderParts(m.Groups[1].Value, PrefixPart(".", m.Groups[2].Value), PrefixPart(".", m.Groups[3].Value), PrefixPart("/", m.Groups[4].Value), PrefixPart("-", m.Groups[5].Value))),
+            "cpf" => Regex.Replace(digits, @"^(\d{0,3})(\d{0,3})(\d{0,3})(\d{0,2}).*$", m => JoinReaderParts(m.Groups[1].Value, PrefixPart(".", m.Groups[2].Value), PrefixPart(".", m.Groups[3].Value), PrefixPart("-", m.Groups[4].Value))),
+            "data" => Regex.Replace(digits, @"^(\d{0,2})(\d{0,2})(\d{0,4}).*$", m => JoinReaderParts(m.Groups[1].Value, PrefixPart("/", m.Groups[2].Value), PrefixPart("/", m.Groups[3].Value))),
+            "valor" => ParseReaderNumber(value),
+            _ => value
+        };
+    }
+
+    private static string PrefixPart(string prefix, string value)
+    {
+        return string.IsNullOrWhiteSpace(value) ? string.Empty : $"{prefix}{value}";
+    }
+
+    private static string JoinReaderParts(params string[] parts)
+    {
+        return string.Concat(parts.Where(part => !string.IsNullOrWhiteSpace(part)));
+    }
+
+    private sealed record ReaderExtractedEntry(string Key, string Value, HashSet<string> Aliases);
+
+    private static readonly string[][] ReaderAliasGroups =
+    [
+        ["chaveacesso", "chave", "chavenfe", "chavedeacesso", "accesskey"],
+        ["numeronfe", "numerodanota", "numerodocumento", "numero", "nfe"],
+        ["serie"],
+        ["emitente", "razaosocial", "razaosocialemitente", "fornecedor", "nomeemitente"],
+        ["cnpj", "cnpjemitente", "documentoemitente", "cpfcnpj", "cpfcnpjemitente"],
+        ["inscricaoestadual", "ie", "ieemitente", "inscestadual"],
+        ["dataemissao", "emissao", "data"],
+        ["endereco", "logradouro", "rua", "enderecocompleto"],
+        ["bairro"],
+        ["cep"],
+        ["municipio", "cidade", "localidade"],
+        ["estado", "uf"],
+        ["telefone", "fone", "celular", "contato"],
+        ["valortotal", "valortotaldanota", "totalnota", "valornota"],
+        ["valortotaldosprodutos", "totalprodutos", "valorprodutos"],
+        ["itens", "produtos"]
+    ];
 
     private static void ValidateRequiredFields(StepExecution current, Dictionary<string, JsonElement> data)
     {
