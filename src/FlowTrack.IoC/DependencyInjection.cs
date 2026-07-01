@@ -1263,13 +1263,15 @@ internal sealed class IntegrationExecutionService(
 
         try
         {
-            db.IntegrationAttempts.Add(attempt);
-            await db.SaveChangesAsync(cancellationToken);
+            await db.Database.ExecuteSqlInterpolatedAsync($@"
+                INSERT INTO ""IntegrationAttempts""
+                (""Id"", ""FlowInstanceId"", ""FlowStepId"", ""StepExecutionId"", ""TriggerType"", ""Method"", ""Url"", ""ResponseStatusCode"", ""Success"", ""DurationMs"", ""CreatedAt"", ""RequestHeaders"", ""RequestBody"", ""ResponsePreview"", ""ErrorMessage"")
+                VALUES
+                ({attempt.Id}, {attempt.FlowInstanceId}, {attempt.FlowStepId}, {attempt.StepExecutionId}, {(int)attempt.TriggerType}, {attempt.Method}, {attempt.Url}, {attempt.ResponseStatusCode}, {attempt.Success}, {attempt.DurationMs}, {attempt.CreatedAt}, {attempt.RequestHeaders}, {attempt.RequestBody}, {attempt.ResponsePreview}, {attempt.ErrorMessage})
+            ", cancellationToken);
         }
-        catch (DbUpdateException ex) when (ex.InnerException is PostgresException postgres && postgres.SqlState == PostgresErrorCodes.UndefinedColumn)
+        catch (PostgresException postgres) when (postgres.SqlState == PostgresErrorCodes.UndefinedColumn)
         {
-            db.Entry(attempt).State = EntityState.Detached;
-
             await db.Database.ExecuteSqlInterpolatedAsync($@"
                 INSERT INTO ""IntegrationAttempts""
                 (""Id"", ""FlowInstanceId"", ""FlowStepId"", ""StepExecutionId"", ""TriggerType"", ""Method"", ""Url"", ""ResponseStatusCode"", ""Success"", ""DurationMs"", ""CreatedAt"", ""ResponsePreview"", ""ErrorMessage"")
