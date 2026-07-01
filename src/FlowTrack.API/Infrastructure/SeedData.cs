@@ -15,6 +15,7 @@ internal static class SeedData
         var tokenProtection = scope.ServiceProvider.GetRequiredService<FlowTrack.Application.ITokenProtectionService>();
 
         await db.Database.MigrateAsync();
+        await EnsureIntegrationAttemptColumnsAsync(db);
 
         if (!await db.AppUsers.AnyAsync(x => x.Email == "diogo@it4you.inf.br"))
         {
@@ -130,5 +131,13 @@ internal static class SeedData
         }
 
         await db.SaveChangesAsync();
+    }
+
+    private static Task EnsureIntegrationAttemptColumnsAsync(AppDbContext db)
+    {
+        return db.Database.ExecuteSqlRawAsync("""
+            ALTER TABLE "IntegrationAttempts" ADD COLUMN IF NOT EXISTS "RequestHeaders" text;
+            ALTER TABLE "IntegrationAttempts" ADD COLUMN IF NOT EXISTS "RequestBody" text;
+            """);
     }
 }

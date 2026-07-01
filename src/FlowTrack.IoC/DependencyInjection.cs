@@ -1270,7 +1270,7 @@ internal sealed class IntegrationExecutionService(
                 ({attempt.Id}, {attempt.FlowInstanceId}, {attempt.FlowStepId}, {attempt.StepExecutionId}, {(int)attempt.TriggerType}, {attempt.Method}, {attempt.Url}, {attempt.ResponseStatusCode}, {attempt.Success}, {attempt.DurationMs}, {attempt.CreatedAt}, {attempt.RequestHeaders}, {attempt.RequestBody}, {attempt.ResponsePreview}, {attempt.ErrorMessage})
             ", cancellationToken);
         }
-        catch (PostgresException postgres) when (postgres.SqlState == PostgresErrorCodes.UndefinedColumn)
+        catch (Exception exception) when (IsUndefinedColumnException(exception))
         {
             await db.Database.ExecuteSqlInterpolatedAsync($@"
                 INSERT INTO ""IntegrationAttempts""
@@ -1281,6 +1281,12 @@ internal sealed class IntegrationExecutionService(
         }
 
         return new IntegrationExecutionResult(success, statusCode, durationMs, attempt.Url, method, attempt.RequestHeaders, attempt.RequestBody, attempt.ResponsePreview, attempt.ErrorMessage, mappedData, awaitingData, awaitingDataMessage, retryAfterMinutes, responseRuleEvaluation);
+    }
+
+    private static bool IsUndefinedColumnException(Exception exception)
+    {
+        return exception is PostgresException { SqlState: PostgresErrorCodes.UndefinedColumn }
+            || exception.GetBaseException() is PostgresException { SqlState: PostgresErrorCodes.UndefinedColumn };
     }
 }
 
