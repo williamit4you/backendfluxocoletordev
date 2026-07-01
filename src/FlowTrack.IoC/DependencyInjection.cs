@@ -127,6 +127,32 @@ internal sealed class IntegrationExecutionService(
             resolvedUrl = $"{resolvedUrl}{ResolveTemplate(config.QueryTemplate, data)}";
         }
 
+        var unresolvedTemplateFields = FindUnresolvedTemplateFields(resolvedUrl);
+        if (unresolvedTemplateFields.Count > 0)
+        {
+            var missingFields = string.Join(", ", unresolvedTemplateFields);
+            return await SaveAttemptAsync(
+                step,
+                triggerType,
+                method,
+                SanitizeUrl(resolvedUrl),
+                false,
+                null,
+                0,
+                null,
+                null,
+                null,
+                $"Campos obrigatorios para a integracao nao foram preenchidos: {missingFields}.",
+                null,
+                false,
+                null,
+                null,
+                null,
+                instance,
+                stepExecution,
+                cancellationToken);
+        }
+
         var validationError = await ValidateDestinationAsync(resolvedUrl, appConfig, cancellationToken);
         if (validationError is not null)
         {
@@ -280,6 +306,15 @@ internal sealed class IntegrationExecutionService(
     private static string ResolveTemplate(string template, Dictionary<string, JsonElement> data)
     {
         return ResolveTemplateText(template, data);
+    }
+
+    private static List<string> FindUnresolvedTemplateFields(string value)
+    {
+        return Regex.Matches(value ?? string.Empty, @"\{\{\s*(?<key>[^}]+?)\s*\}\}")
+            .Select(match => match.Groups["key"].Value.Trim())
+            .Where(key => !string.IsNullOrWhiteSpace(key))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     private static string Truncate(string? value, int max = 1200)
