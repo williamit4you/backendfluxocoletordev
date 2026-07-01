@@ -998,6 +998,67 @@ internal sealed class IntegrationExecutionService(
             yield return "cpfcnpj";
             yield return "cpfcnpjentidade";
         }
+
+        if (normalizedKey is "cnpj" or "cnpjemitente" or "emitentecnpj")
+        {
+            yield return "cnpj";
+            yield return "cnpjemitente";
+            yield return "emitentecnpj";
+        }
+
+        if (normalizedKey is "razaosocial" or "emitente" or "emitenterazaosocial")
+        {
+            yield return "razaosocial";
+            yield return "emitente";
+            yield return "emitenterazaosocial";
+        }
+
+        if (normalizedKey is "inscricaoestadual" or "ie" or "emitenteinscricaoestadual")
+        {
+            yield return "inscricaoestadual";
+            yield return "ie";
+            yield return "emitenteinscricaoestadual";
+        }
+
+        if (normalizedKey is "cep" or "cepemitente" or "emitentecep" or "cep2" or "destinatariocep")
+        {
+            yield return "cep";
+            yield return "cepemitente";
+            yield return "emitentecep";
+            yield return "destinatariocep";
+            yield return "cep2";
+        }
+
+        if (normalizedKey is "bairro" or "bairroemitente" or "emitentebairro" or "destinatariobairro")
+        {
+            yield return "bairro";
+            yield return "bairroemitente";
+            yield return "emitentebairro";
+            yield return "destinatariobairro";
+        }
+
+        if (normalizedKey is "municipio" or "cidade" or "emitentemunicipio" or "destinatariomunicipio")
+        {
+            yield return "municipio";
+            yield return "cidade";
+            yield return "emitentemunicipio";
+            yield return "destinatariomunicipio";
+        }
+
+        if (normalizedKey is "estado" or "uf" or "emitenteuf" or "destinatariouf")
+        {
+            yield return "estado";
+            yield return "uf";
+            yield return "emitenteuf";
+            yield return "destinatariouf";
+        }
+
+        if (normalizedKey is "valortotal" or "valortotaldanota" or "totalnota")
+        {
+            yield return "valortotal";
+            yield return "valortotaldanota";
+            yield return "totalnota";
+        }
     }
 
     private static string NormalizeTemplateText(string value)
