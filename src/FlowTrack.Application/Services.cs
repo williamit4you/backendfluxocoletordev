@@ -13,6 +13,8 @@ public sealed class FlowManagementService(
     IIntegrationExecutionService integrations,
     IAuditService audit) : IFlowManagementService
 {
+    private const int MaxResponseRuleAttempts = 100000;
+
     public async Task<IReadOnlyList<FlowDto>> GetAllAsync(string? scope, CancellationToken cancellationToken)
     {
         var normalizedScope = string.Equals(scope, "builder", StringComparison.OrdinalIgnoreCase) ? "builder" : "runtime";
@@ -478,9 +480,9 @@ public sealed class FlowManagementService(
             }
         }
 
-        if (responseRule.Enabled && responseRule.MaxAttempts is < 1 or > 1000)
+        if (responseRule.Enabled && responseRule.MaxAttempts is < 1 or > MaxResponseRuleAttempts)
         {
-            throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' precisa ter limite de tentativas entre 1 e 1000 na regra de retorno."] });
+            throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' precisa ter limite de tentativas entre 1 e {MaxResponseRuleAttempts} na regra de retorno."] });
         }
 
         if (responseRule.Enabled && responseRule.Mode == "condition" && !IsValidConditionOperator(responseRule.ExpectedType, responseRule.Operator))
@@ -555,7 +557,7 @@ public sealed class FlowManagementService(
             ? Math.Clamp(source?.RetryIntervalMinutes ?? config.EmptyArrayRetryMinutes ?? 3, 1, 10080)
             : null;
         int? maxAttempts = needsRetry
-            ? Math.Clamp(source?.MaxAttempts ?? 20, 1, 1000)
+            ? Math.Clamp(source?.MaxAttempts ?? 20, 1, MaxResponseRuleAttempts)
             : source?.MaxAttempts;
         var operatorName = NormalizeConditionOperator(source?.Operator, expectedType);
 
