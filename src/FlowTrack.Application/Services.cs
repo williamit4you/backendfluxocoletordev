@@ -1141,13 +1141,13 @@ public sealed class InstanceManagementService(
         var flow = FlowRuntimeSelectionHelper.SelectEffectiveVersion(relatedVersions)
             ?? throw new AppConflictException("Nenhuma versao publicada deste fluxo esta disponivel para novas execucoes.");
 
-        if (!HasFlowAccess(flow, actorUserId))
-        {
-            throw new AppForbiddenException();
-        }
-
         var orderedSteps = flow.Steps.OrderBy(x => x.Order).ToList();
         var firstStep = orderedSteps.FirstOrDefault();
+
+        if (!CanStartFlow(flow, firstStep, actorUserId))
+        {
+            throw new AppForbiddenException("Voce nao possui permissao para iniciar este fluxo porque nao esta vinculado a primeira etapa.");
+        }
 
         var now = DateTime.UtcNow;
         var instance = new FlowInstance
@@ -1195,7 +1195,7 @@ public sealed class InstanceManagementService(
 
         if (!CanActOnStep(item.FlowDefinition, current.FlowStep, actorUserId))
         {
-            throw new AppForbiddenException();
+            throw new AppForbiddenException("Voce nao possui permissao para editar a etapa atual.");
         }
 
         if (current.FlowStep.Type == StepType.ApiSend || current.FlowStep.Type == StepType.ApiQuery || current.FlowStep.Type == StepType.Automatic)
@@ -1235,7 +1235,7 @@ public sealed class InstanceManagementService(
 
         if (!CanActOnStep(item.FlowDefinition, current.FlowStep, actorUserId))
         {
-            throw new AppForbiddenException();
+            throw new AppForbiddenException("Voce nao possui permissao para enviar arquivos nesta etapa.");
         }
 
         if (current.FlowStep.Type == StepType.ApiSend || current.FlowStep.Type == StepType.ApiQuery || current.FlowStep.Type == StepType.Automatic)
@@ -1308,7 +1308,7 @@ public sealed class InstanceManagementService(
 
         if (!CanActOnStep(item.FlowDefinition, current.FlowStep, actorUserId))
         {
-            throw new AppForbiddenException();
+            throw new AppForbiddenException("Voce nao possui permissao para concluir a etapa atual.");
         }
 
         if (current.FlowStep.Type == StepType.ApiSend || current.FlowStep.Type == StepType.ApiQuery || current.FlowStep.Type == StepType.Automatic)
@@ -1506,14 +1506,39 @@ public sealed class InstanceManagementService(
         return actorUserId.HasValue && flow.AssignedUsers.Any(user => user.UserId == actorUserId.Value);
     }
 
+    private static bool HasExplicitStepAccess(FlowStep step, Guid? actorUserId)
+    {
+        return actorUserId.HasValue && step.AssignedUsers.Any(user => user.UserId == actorUserId.Value);
+    }
+
+    private static bool CanStartFlow(FlowDefinition flow, FlowStep? firstStep, Guid? actorUserId)
+    {
+        if (!actorUserId.HasValue)
+        {
+            return true;
+        }
+
+        if (firstStep is null)
+        {
+            return HasFlowAccess(flow, actorUserId);
+        }
+
+        if (firstStep.AssignedUsers.Count > 0)
+        {
+            return HasExplicitStepAccess(firstStep, actorUserId);
+        }
+
+        return HasFlowAccess(flow, actorUserId) || flow.AssignedUsers.Count == 0;
+    }
+
     private static bool CanActOnStep(FlowDefinition flow, FlowStep step, Guid? actorUserId)
     {
         var hasStepAssignments = step.AssignedUsers.Count > 0;
-        var assignedToStep = actorUserId.HasValue && step.AssignedUsers.Any(user => user.UserId == actorUserId.Value);
+        var assignedToStep = HasExplicitStepAccess(step, actorUserId);
 
         if (hasStepAssignments)
         {
-            return assignedToStep || HasFlowAccess(flow, actorUserId);
+            return assignedToStep;
         }
 
         return HasFlowAccess(flow, actorUserId) || (flow.AssignedUsers.Count == 0 && !step.AssignedUserId.HasValue);
@@ -1521,18 +1546,23 @@ public sealed class InstanceManagementService(
 
     private static bool CanViewInstance(FlowInstance item, Guid? actorUserId)
     {
-        if (HasFlowAccess(item.FlowDefinition, actorUserId))
-        {
-            return true;
-        }
-
         var currentStep = item.StepExecutions.SingleOrDefault(step => step.Status == StepStatus.InProgress);
-        if (currentStep is null || !actorUserId.HasValue)
+        if (currentStep is null)
         {
-            return false;
+            return HasFlowAccess(item.FlowDefinition, actorUserId);
         }
 
-        return currentStep.FlowStep.AssignedUsers.Any(user => user.UserId == actorUserId.Value);
+        if (currentStep.FlowStep.AssignedUsers.Count > 0)
+        {
+            return HasExplicitStepAccess(currentStep.FlowStep, actorUserId);
+        }
+
+        if (!actorUserId.HasValue)
+        {
+            return item.FlowDefinition.AssignedUsers.Count == 0;
+        }
+
+        return HasFlowAccess(item.FlowDefinition, actorUserId);
     }
 
     private static Dictionary<string, JsonElement> MergeStepData(FlowInstance item, StepExecution current, Dictionary<string, JsonElement>? newData)

@@ -45,7 +45,7 @@ public sealed class InstancesController(IInstanceManagementService instances) : 
         }
         catch (AppForbiddenException)
         {
-            return Forbid();
+            return StatusCode(StatusCodes.Status403Forbidden, new { message = "Acesso negado." });
         }
     }
 
@@ -65,9 +65,9 @@ public sealed class InstancesController(IInstanceManagementService instances) : 
         {
             return NotFound();
         }
-        catch (AppForbiddenException)
+        catch (AppForbiddenException ex)
         {
-            return Forbid();
+            return StatusCode(StatusCodes.Status403Forbidden, new { message = ex.Message });
         }
     }
 
@@ -87,9 +87,9 @@ public sealed class InstancesController(IInstanceManagementService instances) : 
         {
             return Conflict(new { message = ex.Message });
         }
-        catch (AppForbiddenException)
+        catch (AppForbiddenException ex)
         {
-            return Forbid();
+            return StatusCode(StatusCodes.Status403Forbidden, new { message = ex.Message });
         }
     }
 
@@ -112,9 +112,9 @@ public sealed class InstancesController(IInstanceManagementService instances) : 
         {
             return Conflict(new { message = ex.Message });
         }
-        catch (AppForbiddenException)
+        catch (AppForbiddenException ex)
         {
-            return Forbid();
+            return StatusCode(StatusCodes.Status403Forbidden, new { message = ex.Message });
         }
     }
 
@@ -139,9 +139,9 @@ public sealed class InstancesController(IInstanceManagementService instances) : 
         {
             return Conflict(new { message = ex.Message });
         }
-        catch (AppForbiddenException)
+        catch (AppForbiddenException ex)
         {
-            return Forbid();
+            return StatusCode(StatusCodes.Status403Forbidden, new { message = ex.Message });
         }
     }
 
@@ -156,9 +156,9 @@ public sealed class InstancesController(IInstanceManagementService instances) : 
         {
             return NotFound();
         }
-        catch (AppForbiddenException)
+        catch (AppForbiddenException ex)
         {
-            return Forbid();
+            return StatusCode(StatusCodes.Status403Forbidden, new { message = ex.Message });
         }
     }
 
@@ -177,9 +177,9 @@ public sealed class InstancesController(IInstanceManagementService instances) : 
         {
             return Conflict(new { message = ex.Message });
         }
-        catch (AppForbiddenException)
+        catch (AppForbiddenException ex)
         {
-            return Forbid();
+            return StatusCode(StatusCodes.Status403Forbidden, new { message = ex.Message });
         }
     }
 
@@ -198,9 +198,9 @@ public sealed class InstancesController(IInstanceManagementService instances) : 
         {
             return Conflict(new { message = ex.Message });
         }
-        catch (AppForbiddenException)
+        catch (AppForbiddenException ex)
         {
-            return Forbid();
+            return StatusCode(StatusCodes.Status403Forbidden, new { message = ex.Message });
         }
     }
 
