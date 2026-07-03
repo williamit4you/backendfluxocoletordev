@@ -129,7 +129,7 @@ public interface IUserManagementService
 public interface IInstanceManagementService
 {
     Task<IReadOnlyList<InstanceDto>> GetAllAsync(Guid? flowId, string? status, string? search, Guid? actorUserId, CancellationToken cancellationToken);
-    Task<PagedResultDto<InstanceDto>> GetPendingTasksAsync(int page, int pageSize, string? search, Guid? actorUserId, CancellationToken cancellationToken);
+    Task<PagedResultDto<InstanceDto>> GetPendingTasksAsync(int page, int pageSize, string? search, string? statusFilter, Guid? actorUserId, CancellationToken cancellationToken);
     Task<InstanceDto> GetByIdAsync(Guid id, Guid? actorUserId, CancellationToken cancellationToken);
     Task<Guid> CreateAsync(CreateInstanceRequest request, Guid? actorUserId, CancellationToken cancellationToken);
     Task<InstanceDto> SaveCurrentStepDataAsync(Guid id, Dictionary<string, JsonElement> data, string? notes, Guid? actorUserId, CancellationToken cancellationToken);

@@ -1079,7 +1079,7 @@ public sealed class InstanceManagementService(
         return result;
     }
 
-    public async Task<PagedResultDto<InstanceDto>> GetPendingTasksAsync(int page, int pageSize, string? search, Guid? actorUserId, CancellationToken cancellationToken)
+    public async Task<PagedResultDto<InstanceDto>> GetPendingTasksAsync(int page, int pageSize, string? search, string? statusFilter, Guid? actorUserId, CancellationToken cancellationToken)
     {
         var normalizedPage = page < 1 ? 1 : page;
         var normalizedPageSize = pageSize switch
@@ -1089,29 +1089,46 @@ public sealed class InstanceManagementService(
             _ => 50
         };
         var normalizedSearch = search?.Trim().ToLowerInvariant();
+        var normalizedStatusFilter = (statusFilter ?? "pending").Trim().ToLowerInvariant();
+        var actorId = actorUserId ?? Guid.Empty;
 
         var query = db.Instances
             .AsNoTracking()
-            .Where(x => x.Status == InstanceStatus.InProgress)
-            .Where(x => x.StepExecutions.Any(step =>
-                step.Status == StepStatus.InProgress
-                && step.FlowStep.Type != StepType.ApiSend
-                && step.FlowStep.Type != StepType.ApiQuery
-                && step.FlowStep.Type != StepType.Automatic
-                && (
-                    (step.FlowStep.AssignedUsers.Any() || step.FlowStep.AssignedUserId.HasValue)
-                        ? actorUserId.HasValue && (step.FlowStep.AssignedUserId == actorUserId.Value || step.FlowStep.AssignedUsers.Any(user => user.UserId == actorUserId.Value))
-                        : (x.FlowDefinition.AssignedUsers.Any()
-                            ? actorUserId.HasValue && x.FlowDefinition.AssignedUsers.Any(user => user.UserId == actorUserId.Value)
-                            : true)
-                )));
+            .Where(x => actorUserId.HasValue)
+            .Where(x =>
+                x.StepExecutions.Any(step => step.CompletedByUserId == actorId)
+                || x.StepExecutions.Any(step => step.FlowStep.AssignedUserId == actorId || step.FlowStep.AssignedUsers.Any(user => user.UserId == actorId))
+                || (x.FlowDefinition.AssignedUsers.Any(user => user.UserId == actorId)
+                    && !x.StepExecutions.Any(step => step.FlowStep.AssignedUserId.HasValue || step.FlowStep.AssignedUsers.Any())));
+
+        if (normalizedStatusFilter == "pending")
+        {
+            query = query.Where(x =>
+                x.Status == InstanceStatus.InProgress
+                && x.StepExecutions.Any(step =>
+                    step.Status == StepStatus.InProgress
+                    && step.FlowStep.Type != StepType.ApiSend
+                    && step.FlowStep.Type != StepType.ApiQuery
+                    && step.FlowStep.Type != StepType.Automatic
+                    && (
+                        (step.FlowStep.AssignedUsers.Any() || step.FlowStep.AssignedUserId.HasValue)
+                            ? step.FlowStep.AssignedUserId == actorId || step.FlowStep.AssignedUsers.Any(user => user.UserId == actorId)
+                            : (x.FlowDefinition.AssignedUsers.Any()
+                                ? x.FlowDefinition.AssignedUsers.Any(user => user.UserId == actorId)
+                                : true)
+                    )));
+        }
+        else if (normalizedStatusFilter == "executed")
+        {
+            query = query.Where(x => x.StepExecutions.Any(step => step.CompletedByUserId == actorId));
+        }
 
         if (!string.IsNullOrWhiteSpace(normalizedSearch))
         {
             query = query.Where(x =>
                 x.Code.ToLower().Contains(normalizedSearch)
                 || x.FlowDefinition.Name.ToLower().Contains(normalizedSearch)
-                || x.StepExecutions.Any(step => step.Status == StepStatus.InProgress && step.FlowStep.Name.ToLower().Contains(normalizedSearch)));
+                || x.StepExecutions.Any(step => step.FlowStep.Name.ToLower().Contains(normalizedSearch)));
         }
 
         var totalCount = await query.CountAsync(cancellationToken);
