@@ -2077,7 +2077,11 @@ public sealed class InstanceManagementService(
         return new InstanceDto(
             item.Id,
             item.FlowDefinitionId,
+            item.FlowDefinition.FlowKey,
             item.FlowDefinition.Name,
+            item.FlowDefinition.VersionNumber,
+            item.FlowDefinition.LifecycleStatus.ToString(),
+            item.FlowDefinition.Active && item.FlowDefinition.LifecycleStatus == FlowLifecycleStatus.Published,
             item.Code,
             item.Status,
             item.CurrentStepOrder,
