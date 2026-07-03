@@ -121,7 +121,7 @@ public interface IFlowManagementService
 
 public interface IUserManagementService
 {
-    Task<IReadOnlyList<UserDto>> GetAllAsync(CancellationToken cancellationToken);
+    Task<IReadOnlyList<UserDto>> GetAllAsync(string? currentUserRole, CancellationToken cancellationToken);
     Task<UserDto> CreateAsync(CreateUserRequest request, string? currentUserRole, Guid? actorUserId, CancellationToken cancellationToken);
     Task<UserDto> UpdateAsync(Guid id, UpdateUserRequest request, string? currentUserRole, Guid? actorUserId, CancellationToken cancellationToken);
 }

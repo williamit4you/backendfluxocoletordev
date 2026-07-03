@@ -13,7 +13,7 @@ public sealed class UsersController(IUserManagementService users) : ControllerBa
     [HttpGet]
     public async Task<ActionResult<IReadOnlyList<UserDto>>> GetAll()
     {
-        return Ok(await users.GetAllAsync(HttpContext.RequestAborted));
+        return Ok(await users.GetAllAsync(User.FindFirstValue(ClaimTypes.Role), HttpContext.RequestAborted));
     }
 
     [HttpPost]

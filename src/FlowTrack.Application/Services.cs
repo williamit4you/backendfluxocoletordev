@@ -912,10 +912,18 @@ public sealed class UserManagementService(
     IPasswordService passwords,
     IAuditService audit) : IUserManagementService
 {
-    public async Task<IReadOnlyList<UserDto>> GetAllAsync(CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<UserDto>> GetAllAsync(string? currentUserRole, CancellationToken cancellationToken)
     {
-        return await db.Users
+        var query = db.Users
             .AsNoTracking()
+            .AsQueryable();
+
+        if (IsAdmin(currentUserRole))
+        {
+            query = query.Where(x => x.Role != UserRole.SuperAdmin);
+        }
+
+        return await query
             .OrderBy(x => x.Name)
             .Select(x => new UserDto(x.Id, x.Name, x.Email, x.Role.ToString(), x.Active))
             .ToListAsync(cancellationToken);
@@ -971,6 +979,11 @@ public sealed class UserManagementService(
         var user = await db.Users.SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
             ?? throw new AppNotFoundException("Usuário não encontrado.");
 
+        if (IsAdmin(currentUserRole) && user.Role == UserRole.SuperAdmin)
+        {
+            throw new AppForbiddenException();
+        }
+
         if (user.Role == UserRole.SuperAdmin && (!request.Active || role != UserRole.SuperAdmin))
         {
             var activeSuperAdmins = await db.Users.CountAsync(x => x.Active && x.Role == UserRole.SuperAdmin, cancellationToken);
@@ -1020,8 +1033,13 @@ public sealed class UserManagementService(
 
     private static bool IsAdminTryingToGrantSuperAdmin(string? currentUserRole, UserRole role)
     {
-        return string.Equals(currentUserRole, UserRole.Admin.ToString(), StringComparison.OrdinalIgnoreCase)
+        return IsAdmin(currentUserRole)
             && role == UserRole.SuperAdmin;
+    }
+
+    private static bool IsAdmin(string? currentUserRole)
+    {
+        return string.Equals(currentUserRole, UserRole.Admin.ToString(), StringComparison.OrdinalIgnoreCase);
     }
 }
 
