@@ -52,7 +52,7 @@ public sealed class FlowManagementService(
     public async Task<FlowDto> GetByIdAsync(Guid id, CancellationToken cancellationToken)
     {
         var flow = await LoadFlows().AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
-            ?? throw new AppNotFoundException("Fluxo nao encontrado.");
+            ?? throw new AppNotFoundException("Fluxo não encontrado.");
 
         var hasDraft = await db.Flows.AnyAsync(x => x.FlowKey == flow.FlowKey && x.LifecycleStatus == FlowLifecycleStatus.Draft && x.Id != flow.Id, cancellationToken);
         return ToDto(flow, includeTokenValues: true, hasDraft: hasDraft || flow.LifecycleStatus == FlowLifecycleStatus.Draft);
@@ -83,18 +83,18 @@ public sealed class FlowManagementService(
         try
         {
             var dbContext = db as DbContext
-                ?? throw new InvalidOperationException("O contexto de dados nao suporta operacoes transacionais para atualizar o fluxo.");
+                ?? throw new InvalidOperationException("O contexto de dados não suporta operações transacionais para atualizar o fluxo.");
             await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
 
             var flow = await db.Flows.SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
-                ?? throw new AppNotFoundException("Fluxo nao encontrado.");
+                ?? throw new AppNotFoundException("Fluxo não encontrado.");
 
             var flowHasExecutions = await db.Instances.AnyAsync(x => x.FlowDefinitionId == flow.Id, cancellationToken);
             if (flowHasExecutions)
             {
                 if (flow.LifecycleStatus != FlowLifecycleStatus.Draft)
                 {
-                    throw new AppConflictException("Esta versao ja possui execucoes. Crie um rascunho para gerar uma nova versao sem alterar o historico.");
+                    throw new AppConflictException("Esta versão já possui execuções. Crie um rascunho para gerar uma nova versão sem alterar o histórico.");
                 }
 
                 var nextVersion = await db.Flows
@@ -115,7 +115,7 @@ public sealed class FlowManagementService(
                 db.Add(replacementDraft);
                 await db.SaveChangesAsync(cancellationToken);
                 await transaction.CommitAsync(cancellationToken);
-                await audit.WriteAsync("Flow", "UpdateDraft", "FlowDefinition", replacementDraft.Id, $"Novo rascunho v{replacementDraft.VersionNumber} criado para preservar execucoes anteriores de '{replacementDraft.Name}'.", actorUserId, cancellationToken);
+                await audit.WriteAsync("Flow", "UpdateDraft", "FlowDefinition", replacementDraft.Id, $"Novo rascunho v{replacementDraft.VersionNumber} criado para preservar execuções anteriores de '{replacementDraft.Name}'.", actorUserId, cancellationToken);
                 return replacementDraft.Id;
             }
 
@@ -123,7 +123,7 @@ public sealed class FlowManagementService(
             dbContext.ChangeTracker.Clear();
 
             flow = await db.Flows.SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
-                ?? throw new AppNotFoundException("Fluxo nao encontrado.");
+                ?? throw new AppNotFoundException("Fluxo não encontrado.");
 
             Apply(flow, request);
             MarkFlowDefinitionChildrenAsAdded(dbContext, flow);
@@ -134,7 +134,7 @@ public sealed class FlowManagementService(
         }
         catch (DbUpdateConcurrencyException ex)
         {
-            throw new AppConflictException("O rascunho foi alterado por outra operacao durante o salvamento. Reabra o fluxo e tente salvar novamente.", ex);
+            throw new AppConflictException("O rascunho foi alterado por outra operação durante o salvamento. Reabra o fluxo e tente salvar novamente.", ex);
         }
     }
 
@@ -231,7 +231,7 @@ public sealed class FlowManagementService(
     public async Task<Guid> CreateDraftAsync(Guid id, Guid? actorUserId, CancellationToken cancellationToken)
     {
         var source = await LoadFlows().AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
-            ?? throw new AppNotFoundException("Fluxo nao encontrado.");
+            ?? throw new AppNotFoundException("Fluxo não encontrado.");
 
         var existingDrafts = await LoadFlows()
             .Where(x => x.FlowKey == source.FlowKey && x.LifecycleStatus == FlowLifecycleStatus.Draft)
@@ -262,7 +262,7 @@ public sealed class FlowManagementService(
     public async Task<Guid> PublishAsync(Guid id, Guid? actorUserId, CancellationToken cancellationToken)
     {
         var draft = await LoadFlows().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
-            ?? throw new AppNotFoundException("Fluxo nao encontrado.");
+            ?? throw new AppNotFoundException("Fluxo não encontrado.");
 
         if (draft.LifecycleStatus != FlowLifecycleStatus.Draft)
         {
@@ -284,21 +284,21 @@ public sealed class FlowManagementService(
         draft.PublishedAt = DateTime.UtcNow;
 
         await db.SaveChangesAsync(cancellationToken);
-        await audit.WriteAsync("Flow", "Publish", "FlowDefinition", draft.Id, $"Fluxo '{draft.Name}' publicado na versao {draft.VersionNumber}.", actorUserId, cancellationToken);
+        await audit.WriteAsync("Flow", "Publish", "FlowDefinition", draft.Id, $"Fluxo '{draft.Name}' publicado na versão {draft.VersionNumber}.", actorUserId, cancellationToken);
         return draft.Id;
     }
 
     public async Task<IntegrationTestResponse> TestIntegrationAsync(Guid flowId, Guid stepId, IntegrationTestRequest request, CancellationToken cancellationToken)
     {
         var flow = await LoadFlows().SingleOrDefaultAsync(x => x.Id == flowId, cancellationToken)
-            ?? throw new AppNotFoundException("Fluxo nao encontrado.");
+            ?? throw new AppNotFoundException("Fluxo não encontrado.");
 
         var step = flow.Steps.SingleOrDefault(x => x.Id == stepId)
-            ?? throw new AppNotFoundException("Etapa nao encontrada.");
+            ?? throw new AppNotFoundException("Etapa não encontrada.");
 
         if (step.Type != StepType.ApiSend && step.Type != StepType.ApiQuery)
         {
-            throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = ["Esta etapa nao possui integracao de API para teste."] });
+            throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = ["Esta etapa não possui integração de API para teste."] });
         }
 
         var result = await integrations.ExecuteAsync(flow, step, request.Data, cancellationToken, triggerType: IntegrationTriggerType.Test);
@@ -441,14 +441,14 @@ public sealed class FlowManagementService(
         var scheduleMode = (step.ApiConfig.ScheduleMode ?? "manual").Trim().ToLowerInvariant();
         if (scheduleMode is not ("manual" or "interval" or "cron"))
         {
-            throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' possui um modo de agendamento invalido. Use manual, interval ou cron."] });
+            throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' possui um modo de agendamento inválido. Use manual, interval ou cron."] });
         }
 
         if (scheduleMode == "interval")
         {
             if (!TryParseIntervalMinutes(step.ApiConfig.ScheduleValue, out var minutes))
             {
-                throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' precisa de um intervalo valido. Exemplos aceitos: '5 minutos', '15 minutos', '60 minutos' ou apenas '30'."] });
+                throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' precisa de um intervalo válido. Exemplos aceitos: '5 minutos', '15 minutos', '60 minutos' ou apenas '30'."] });
             }
 
             if (minutes < 1 || minutes > 10080)
@@ -459,7 +459,7 @@ public sealed class FlowManagementService(
 
         if (scheduleMode == "cron" && !IsValidCronExpression(step.ApiConfig.ScheduleValue))
         {
-            throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' precisa de uma expressao cron valida com 5 partes. Exemplo: '*/30 * * * *'."] });
+                throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' precisa de uma expressão cron válida com 5 partes. Exemplo: '*/30 * * * *'."] });
         }
 
         var responseRule = NormalizeResponseRule(step.ApiConfig);
@@ -470,7 +470,7 @@ public sealed class FlowManagementService(
         {
             if (step.Type != StepType.ApiQuery && step.Type != StepType.ApiSend)
             {
-                throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' so pode usar regra de retorno com nova tentativa em API envio ou API consulta."] });
+                throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' só pode usar regra de retorno com nova tentativa em API de envio ou API de consulta."] });
             }
 
             var retryMinutes = responseRule.RetryIntervalMinutes ?? 0;
@@ -487,7 +487,7 @@ public sealed class FlowManagementService(
 
         if (responseRule.Enabled && responseRule.Mode == "condition" && !IsValidConditionOperator(responseRule.ExpectedType, responseRule.Operator))
         {
-            throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' possui operador invalido para o tipo esperado na regra de retorno."] });
+            throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' possui operador inválido para o tipo esperado na regra de retorno."] });
         }
     }
 
@@ -500,17 +500,17 @@ public sealed class FlowManagementService(
         if (scheduleMode == "interval" && TryParseIntervalMinutes(config.ScheduleValue, out var minutes))
         {
             scheduleValue = $"{minutes} minutos";
-            assist = new StepScheduleAssistDto(minutes, null, $"Execucao recorrente a cada {minutes} minuto(s).");
+            assist = new StepScheduleAssistDto(minutes, null, $"Execução recorrente a cada {minutes} minuto(s).");
         }
         else if (scheduleMode == "cron" && IsValidCronExpression(config.ScheduleValue))
         {
             scheduleValue = config.ScheduleValue!.Trim();
-            assist = new StepScheduleAssistDto(null, scheduleValue, $"Expressao cron validada: {scheduleValue}.");
+            assist = new StepScheduleAssistDto(null, scheduleValue, $"Expressão cron validada: {scheduleValue}.");
         }
         else
         {
             scheduleMode = "manual";
-            assist = new StepScheduleAssistDto(null, null, "Execucao manual, sem agendamento automatico.");
+            assist = new StepScheduleAssistDto(null, null, "Execução manual, sem agendamento automático.");
         }
 
         var responseRule = NormalizeResponseRule(config);
@@ -747,7 +747,7 @@ public sealed class FlowManagementService(
 
         if (request.Steps.Count == 0)
         {
-            throw new AppValidationException(new Dictionary<string, string[]> { ["steps"] = ["Ao menos uma etapa e obrigatoria."] });
+            throw new AppValidationException(new Dictionary<string, string[]> { ["steps"] = ["Ao menos uma etapa é obrigatória."] });
         }
 
         var fieldKeys = request.Steps
@@ -875,12 +875,12 @@ public sealed class FlowManagementService(
     {
         if (!draft.Steps.Any())
         {
-            throw new AppValidationException(new Dictionary<string, string[]> { ["steps"] = ["Nao e possivel publicar um fluxo sem etapas."] });
+            throw new AppValidationException(new Dictionary<string, string[]> { ["steps"] = ["Não é possível publicar um fluxo sem etapas."] });
         }
 
         if (draft.Steps.Any(step => string.IsNullOrWhiteSpace(step.Name)))
         {
-            throw new AppValidationException(new Dictionary<string, string[]> { ["steps"] = ["Todas as etapas precisam estar nomeadas antes da publicacao."] });
+            throw new AppValidationException(new Dictionary<string, string[]> { ["steps"] = ["Todas as etapas precisam estar nomeadas antes da publicação."] });
         }
     }
 }
@@ -927,7 +927,7 @@ public sealed class UserManagementService(
 
         if (!Enum.TryParse<UserRole>(request.Role, true, out var role))
         {
-            throw new AppValidationException(new Dictionary<string, string[]> { ["role"] = ["Perfil invalido."] });
+            throw new AppValidationException(new Dictionary<string, string[]> { ["role"] = ["Perfil inválido."] });
         }
 
         if (IsAdminTryingToGrantSuperAdmin(currentUserRole, role))
@@ -946,7 +946,7 @@ public sealed class UserManagementService(
         user.PasswordHash = passwords.Hash(user, request.Password);
         db.Add(user);
         await db.SaveChangesAsync(cancellationToken);
-        await audit.WriteAsync("User", "Create", "AppUser", user.Id, $"Usuario '{user.Email}' criado com perfil {user.Role}.", actorUserId, cancellationToken);
+        await audit.WriteAsync("User", "Create", "AppUser", user.Id, $"Usuário '{user.Email}' criado com perfil {user.Role}.", actorUserId, cancellationToken);
 
         return new UserDto(user.Id, user.Name, user.Email, user.Role.ToString(), user.Active);
     }
@@ -960,7 +960,7 @@ public sealed class UserManagementService(
 
         if (!Enum.TryParse<UserRole>(request.Role, true, out var role))
         {
-            throw new AppValidationException(new Dictionary<string, string[]> { ["role"] = ["Perfil invalido."] });
+            throw new AppValidationException(new Dictionary<string, string[]> { ["role"] = ["Perfil inválido."] });
         }
 
         if (IsAdminTryingToGrantSuperAdmin(currentUserRole, role))
@@ -969,14 +969,14 @@ public sealed class UserManagementService(
         }
 
         var user = await db.Users.SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
-            ?? throw new AppNotFoundException("Usuario nao encontrado.");
+            ?? throw new AppNotFoundException("Usuário não encontrado.");
 
         if (user.Role == UserRole.SuperAdmin && (!request.Active || role != UserRole.SuperAdmin))
         {
             var activeSuperAdmins = await db.Users.CountAsync(x => x.Active && x.Role == UserRole.SuperAdmin, cancellationToken);
             if (activeSuperAdmins <= 1)
             {
-                throw new AppConflictException("Nao e permitido desativar ou rebaixar o ultimo super admin ativo.");
+                throw new AppConflictException("Não é permitido desativar ou rebaixar o último super admin ativo.");
             }
         }
 
@@ -995,7 +995,7 @@ public sealed class UserManagementService(
         }
 
         await db.SaveChangesAsync(cancellationToken);
-        await audit.WriteAsync("User", "Update", "AppUser", user.Id, $"Usuario '{user.Email}' atualizado para perfil {user.Role} e status {(user.Active ? "ativo" : "inativo")}.", actorUserId, cancellationToken);
+        await audit.WriteAsync("User", "Update", "AppUser", user.Id, $"Usuário '{user.Email}' atualizado para perfil {user.Role} e status {(user.Active ? "ativo" : "inativo")}.", actorUserId, cancellationToken);
         return new UserDto(user.Id, user.Name, user.Email, user.Role.ToString(), user.Active);
     }
 
@@ -1014,7 +1014,7 @@ public sealed class UserManagementService(
         var normalizedEmail = request.Email.Trim().ToLowerInvariant();
         if (await db.Users.AnyAsync(x => x.Email == normalizedEmail, cancellationToken))
         {
-            throw new AppConflictException("Ja existe um usuario com este e-mail.");
+            throw new AppConflictException("Já existe um usuário com este e-mail.");
         }
     }
 
@@ -1110,7 +1110,7 @@ public sealed class InstanceManagementService(
     public async Task<InstanceDto> GetByIdAsync(Guid id, Guid? actorUserId, CancellationToken cancellationToken)
     {
         var item = await LoadInstance().AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
-            ?? throw new AppNotFoundException("Execucao nao encontrada.");
+            ?? throw new AppNotFoundException("Execução não encontrada.");
 
         if (!CanViewInstance(item, actorUserId))
         {
@@ -1126,27 +1126,31 @@ public sealed class InstanceManagementService(
             .Include(x => x.Tokens)
             .Include(x => x.AssignedUsers)
             .Include(x => x.Steps)
+                .ThenInclude(x => x.AssignedUsers)
+            .Include(x => x.Steps)
                 .ThenInclude(x => x.Fields)
             .SingleOrDefaultAsync(x => x.Id == request.FlowDefinitionId && x.Active, cancellationToken)
-            ?? throw new AppNotFoundException("Fluxo nao encontrado.");
+            ?? throw new AppNotFoundException("Fluxo não encontrado.");
 
         var relatedVersions = await db.Flows
             .Include(x => x.Tokens)
             .Include(x => x.AssignedUsers)
+            .Include(x => x.Steps)
+                .ThenInclude(x => x.AssignedUsers)
             .Include(x => x.Steps)
                 .ThenInclude(x => x.Fields)
             .Where(x => x.FlowKey == requestedFlow.FlowKey && x.Active)
             .ToListAsync(cancellationToken);
 
         var flow = FlowRuntimeSelectionHelper.SelectEffectiveVersion(relatedVersions)
-            ?? throw new AppConflictException("Nenhuma versao publicada deste fluxo esta disponivel para novas execucoes.");
+            ?? throw new AppConflictException("Nenhuma versão publicada deste fluxo está disponível para novas execuções.");
 
         var orderedSteps = flow.Steps.OrderBy(x => x.Order).ToList();
         var firstStep = orderedSteps.FirstOrDefault();
 
         if (!CanStartFlow(flow, firstStep, actorUserId))
         {
-            throw new AppForbiddenException("Voce nao possui permissao para iniciar este fluxo porque nao esta vinculado a primeira etapa.");
+            throw new AppForbiddenException("Você não tem permissão para iniciar este fluxo.");
         }
 
         var now = DateTime.UtcNow;
@@ -1180,11 +1184,11 @@ public sealed class InstanceManagementService(
     public async Task<InstanceDto> SaveCurrentStepDataAsync(Guid id, Dictionary<string, JsonElement> data, string? notes, Guid? actorUserId, CancellationToken cancellationToken)
     {
         var item = await LoadInstance().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
-            ?? throw new AppNotFoundException("Execucao nao encontrada.");
+            ?? throw new AppNotFoundException("Execução não encontrada.");
 
         if (item.Status != InstanceStatus.InProgress)
         {
-            throw new AppConflictException("Execucao nao esta em andamento.");
+            throw new AppConflictException("A execução não está em andamento.");
         }
 
         var current = item.StepExecutions.SingleOrDefault(x => x.Status == StepStatus.InProgress);
@@ -1195,12 +1199,12 @@ public sealed class InstanceManagementService(
 
         if (!CanActOnStep(item.FlowDefinition, current.FlowStep, actorUserId))
         {
-            throw new AppForbiddenException("Voce nao possui permissao para editar a etapa atual.");
+            throw new AppForbiddenException("Você não possui permissão para editar a etapa atual.");
         }
 
         if (current.FlowStep.Type == StepType.ApiSend || current.FlowStep.Type == StepType.ApiQuery || current.FlowStep.Type == StepType.Automatic)
         {
-            throw new AppConflictException("A etapa atual eh automatica e nao aceita preenchimento manual.");
+            throw new AppConflictException("A etapa atual é automática e não aceita preenchimento manual.");
         }
 
         var mergedData = MergeStepData(item, current, data);
@@ -1220,11 +1224,11 @@ public sealed class InstanceManagementService(
     public async Task<InstanceDto> UploadCurrentStepFileAsync(Guid id, string fieldKey, string fileName, string? contentType, Stream stream, Guid? actorUserId, CancellationToken cancellationToken)
     {
         var item = await LoadInstance().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
-            ?? throw new AppNotFoundException("Execucao nao encontrada.");
+            ?? throw new AppNotFoundException("Execução não encontrada.");
 
         if (item.Status != InstanceStatus.InProgress)
         {
-            throw new AppConflictException("Execucao nao esta em andamento.");
+            throw new AppConflictException("A execução não está em andamento.");
         }
 
         var current = item.StepExecutions.SingleOrDefault(x => x.Status == StepStatus.InProgress);
@@ -1235,23 +1239,23 @@ public sealed class InstanceManagementService(
 
         if (!CanActOnStep(item.FlowDefinition, current.FlowStep, actorUserId))
         {
-            throw new AppForbiddenException("Voce nao possui permissao para enviar arquivos nesta etapa.");
+            throw new AppForbiddenException("Você não possui permissão para enviar arquivos nesta etapa.");
         }
 
         if (current.FlowStep.Type == StepType.ApiSend || current.FlowStep.Type == StepType.ApiQuery || current.FlowStep.Type == StepType.Automatic)
         {
-            throw new AppConflictException("A etapa atual eh automatica e nao aceita anexos manuais.");
+            throw new AppConflictException("A etapa atual é automática e não aceita anexos manuais.");
         }
 
         var normalizedFieldKey = fieldKey.Trim();
         var field = current.FlowStep.Fields.SingleOrDefault(x => string.Equals(x.Key, normalizedFieldKey, StringComparison.OrdinalIgnoreCase))
-            ?? throw new AppValidationException(new Dictionary<string, string[]> { ["fieldKey"] = ["Campo da etapa nao encontrado."] });
+            ?? throw new AppValidationException(new Dictionary<string, string[]> { ["fieldKey"] = ["Campo da etapa não encontrado."] });
 
         var isPhoto = field.Type == FieldType.Photo;
         var isAttachment = field.Type == FieldType.Attachment || field.Type == FieldType.Document;
         if (!isPhoto && !isAttachment)
         {
-            throw new AppValidationException(new Dictionary<string, string[]> { ["fieldKey"] = ["O campo informado nao aceita upload de arquivos."] });
+            throw new AppValidationException(new Dictionary<string, string[]> { ["fieldKey"] = ["O campo informado não aceita upload de arquivos."] });
         }
 
         if (isPhoto && !string.IsNullOrWhiteSpace(contentType) && !contentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
@@ -1293,11 +1297,11 @@ public sealed class InstanceManagementService(
     public async Task AdvanceAsync(Guid id, AdvanceStepRequest request, Guid? actorUserId, CancellationToken cancellationToken)
     {
         var item = await LoadInstance().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
-            ?? throw new AppNotFoundException("Execucao nao encontrada.");
+            ?? throw new AppNotFoundException("Execução não encontrada.");
 
         if (item.Status != InstanceStatus.InProgress)
         {
-            throw new AppConflictException("Execucao nao esta em andamento.");
+            throw new AppConflictException("A execução não está em andamento.");
         }
 
         var current = item.StepExecutions.SingleOrDefault(x => x.Status == StepStatus.InProgress);
@@ -1308,12 +1312,12 @@ public sealed class InstanceManagementService(
 
         if (!CanActOnStep(item.FlowDefinition, current.FlowStep, actorUserId))
         {
-            throw new AppForbiddenException("Voce nao possui permissao para concluir a etapa atual.");
+            throw new AppForbiddenException("Você não possui permissão para concluir a etapa atual.");
         }
 
         if (current.FlowStep.Type == StepType.ApiSend || current.FlowStep.Type == StepType.ApiQuery || current.FlowStep.Type == StepType.Automatic)
         {
-            throw new AppConflictException("A etapa atual eh automatica. Use o retry de integracao se necessario.");
+            throw new AppConflictException("A etapa atual é automática. Use o retry de integração, se necessário.");
         }
 
         var mergedData = MergeStepData(item, current, request.Data);
@@ -1329,7 +1333,7 @@ public sealed class InstanceManagementService(
     public async Task<InstanceDto> RetryIntegrationAsync(Guid id, Guid? actorUserId, CancellationToken cancellationToken)
     {
         var item = await LoadInstance().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
-            ?? throw new AppNotFoundException("Execucao nao encontrada.");
+            ?? throw new AppNotFoundException("Execução não encontrada.");
 
         if (!CanViewInstance(item, actorUserId))
         {
@@ -1344,7 +1348,7 @@ public sealed class InstanceManagementService(
     public async Task<InstanceDto> ReprocessStepAsync(Guid id, Guid stepExecutionId, Guid? actorUserId, CancellationToken cancellationToken)
     {
         var item = await LoadInstance().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
-            ?? throw new AppNotFoundException("Execucao nao encontrada.");
+            ?? throw new AppNotFoundException("Execução não encontrada.");
 
         if (!CanViewInstance(item, actorUserId))
         {
@@ -1352,7 +1356,7 @@ public sealed class InstanceManagementService(
         }
 
         var target = item.StepExecutions.SingleOrDefault(x => x.Id == stepExecutionId)
-            ?? throw new AppNotFoundException("Etapa da execucao nao encontrada.");
+            ?? throw new AppNotFoundException("Etapa da execução não encontrada.");
 
         var current = item.StepExecutions.SingleOrDefault(x => x.Status == StepStatus.InProgress || x.Status == StepStatus.Failed);
         var isCurrentStep = current?.Id == target.Id;
@@ -1360,7 +1364,7 @@ public sealed class InstanceManagementService(
 
         if (!isAutomaticType)
         {
-            throw new AppConflictException("A etapa selecionada nao suporta reprocessamento manual.");
+            throw new AppConflictException("A etapa selecionada não suporta reprocessamento manual.");
         }
 
         if (isCurrentStep)
@@ -1372,12 +1376,12 @@ public sealed class InstanceManagementService(
 
         if (target.Status != StepStatus.Completed)
         {
-            throw new AppConflictException("Somente a etapa automatica atual ou etapas concluidas podem ser reprocessadas manualmente.");
+            throw new AppConflictException("Somente a etapa automática atual ou etapas concluídas podem ser reprocessadas manualmente.");
         }
 
         if (target.FlowStep.Type != StepType.ApiSend && target.FlowStep.Type != StepType.ApiQuery)
         {
-            throw new AppConflictException("Reprocessamento de etapa concluida esta disponivel apenas para integracoes.");
+            throw new AppConflictException("O reprocessamento de etapa concluída está disponível apenas para integrações.");
         }
 
         var mergedData = MergeStepData(item, target, null);
@@ -1408,7 +1412,7 @@ public sealed class InstanceManagementService(
     public async Task<InstanceDto> CancelWaitingStepAsync(Guid id, Guid stepExecutionId, Guid? actorUserId, CancellationToken cancellationToken)
     {
         var item = await LoadInstance().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
-            ?? throw new AppNotFoundException("Execucao nao encontrada.");
+            ?? throw new AppNotFoundException("Execução não encontrada.");
 
         if (!CanViewInstance(item, actorUserId))
         {
@@ -1416,22 +1420,22 @@ public sealed class InstanceManagementService(
         }
 
         var target = item.StepExecutions.SingleOrDefault(x => x.Id == stepExecutionId)
-            ?? throw new AppNotFoundException("Etapa da execucao nao encontrada.");
+            ?? throw new AppNotFoundException("Etapa da execução não encontrada.");
 
         if (target.FlowStep.Type != StepType.ApiSend && target.FlowStep.Type != StepType.ApiQuery)
         {
-            throw new AppConflictException("Apenas etapas de integracao podem cancelar a espera por retorno.");
+            throw new AppConflictException("Apenas etapas de integração podem cancelar a espera por retorno.");
         }
 
         if (target.Status != StepStatus.InProgress)
         {
-            throw new AppConflictException("Somente a etapa automatica atual em andamento pode ter a espera cancelada.");
+            throw new AppConflictException("Somente a etapa automática atual em andamento pode ter a espera cancelada.");
         }
 
         var current = item.StepExecutions.SingleOrDefault(x => x.Status == StepStatus.InProgress);
         if (current?.Id != target.Id)
         {
-            throw new AppConflictException("Somente a etapa automatica atual em andamento pode ter a espera cancelada.");
+            throw new AppConflictException("Somente a etapa automática atual em andamento pode ter a espera cancelada.");
         }
 
         var currentData = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(item.DataJson) ?? [];
@@ -1445,7 +1449,7 @@ public sealed class InstanceManagementService(
 
         if (!isAwaitingData)
         {
-            throw new AppConflictException("Esta etapa nao esta aguardando um novo retorno automatico para ser cancelada.");
+            throw new AppConflictException("Esta etapa não está aguardando um novo retorno automático para ser cancelada.");
         }
 
         currentData.Remove("_integration.awaitingData");
@@ -1453,11 +1457,11 @@ public sealed class InstanceManagementService(
         currentData.Remove("_integration.emptyResultRetryMinutes");
         currentData.Remove("_integration.responseRule.nextAttemptAtUtc");
         currentData["_integration.responseRule.status"] = JsonSerializer.SerializeToElement("cancelled");
-        currentData["_integration.responseRule.reason"] = JsonSerializer.SerializeToElement("Aguarda de retorno cancelada manualmente. Nenhuma nova consulta automatica sera executada.");
+        currentData["_integration.responseRule.reason"] = JsonSerializer.SerializeToElement("A guarda de retorno foi cancelada manualmente. Nenhuma nova consulta automática será executada.");
 
         var now = DateTime.UtcNow;
         target.Status = StepStatus.Failed;
-        target.Notes = "Aguarda de retorno cancelada manualmente.";
+        target.Notes = "A guarda de retorno foi cancelada manualmente.";
         target.DataJson = JsonSerializer.Serialize(currentData);
         item.DataJson = JsonSerializer.Serialize(currentData);
         item.UpdatedAt = now;
@@ -1508,7 +1512,9 @@ public sealed class InstanceManagementService(
 
     private static bool HasExplicitStepAccess(FlowStep step, Guid? actorUserId)
     {
-        return actorUserId.HasValue && step.AssignedUsers.Any(user => user.UserId == actorUserId.Value);
+        return actorUserId.HasValue
+            && (step.AssignedUsers.Any(user => user.UserId == actorUserId.Value)
+                || step.AssignedUserId == actorUserId.Value);
     }
 
     private static bool CanStartFlow(FlowDefinition flow, FlowStep? firstStep, Guid? actorUserId)
@@ -1523,7 +1529,7 @@ public sealed class InstanceManagementService(
             return HasFlowAccess(flow, actorUserId);
         }
 
-        if (firstStep.AssignedUsers.Count > 0)
+        if (firstStep.AssignedUsers.Count > 0 || firstStep.AssignedUserId.HasValue)
         {
             return HasExplicitStepAccess(firstStep, actorUserId);
         }
@@ -1533,7 +1539,7 @@ public sealed class InstanceManagementService(
 
     private static bool CanActOnStep(FlowDefinition flow, FlowStep step, Guid? actorUserId)
     {
-        var hasStepAssignments = step.AssignedUsers.Count > 0;
+        var hasStepAssignments = step.AssignedUsers.Count > 0 || step.AssignedUserId.HasValue;
         var assignedToStep = HasExplicitStepAccess(step, actorUserId);
 
         if (hasStepAssignments)
@@ -1552,7 +1558,7 @@ public sealed class InstanceManagementService(
             return HasFlowAccess(item.FlowDefinition, actorUserId);
         }
 
-        if (currentStep.FlowStep.AssignedUsers.Count > 0)
+        if (currentStep.FlowStep.AssignedUsers.Count > 0 || currentStep.FlowStep.AssignedUserId.HasValue)
         {
             return HasExplicitStepAccess(currentStep.FlowStep, actorUserId);
         }
