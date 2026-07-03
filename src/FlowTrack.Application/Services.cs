@@ -1079,32 +1079,70 @@ public sealed class InstanceManagementService(
         return result;
     }
 
-    public async Task<IReadOnlyList<InstanceDto>> GetPendingTasksAsync(Guid? actorUserId, CancellationToken cancellationToken)
+    public async Task<PagedResultDto<InstanceDto>> GetPendingTasksAsync(int page, int pageSize, string? search, Guid? actorUserId, CancellationToken cancellationToken)
     {
-        var rows = await LoadInstance()
+        var normalizedPage = page < 1 ? 1 : page;
+        var normalizedPageSize = pageSize switch
+        {
+            <= 10 => 10,
+            <= 30 => 30,
+            _ => 50
+        };
+        var normalizedSearch = search?.Trim().ToLowerInvariant();
+
+        var query = db.Instances
             .AsNoTracking()
             .Where(x => x.Status == InstanceStatus.InProgress)
+            .Where(x => x.StepExecutions.Any(step =>
+                step.Status == StepStatus.InProgress
+                && step.FlowStep.Type != StepType.ApiSend
+                && step.FlowStep.Type != StepType.ApiQuery
+                && step.FlowStep.Type != StepType.Automatic
+                && (
+                    (step.FlowStep.AssignedUsers.Any() || step.FlowStep.AssignedUserId.HasValue)
+                        ? actorUserId.HasValue && (step.FlowStep.AssignedUserId == actorUserId.Value || step.FlowStep.AssignedUsers.Any(user => user.UserId == actorUserId.Value))
+                        : (x.FlowDefinition.AssignedUsers.Any()
+                            ? actorUserId.HasValue && x.FlowDefinition.AssignedUsers.Any(user => user.UserId == actorUserId.Value)
+                            : true)
+                )));
+
+        if (!string.IsNullOrWhiteSpace(normalizedSearch))
+        {
+            query = query.Where(x =>
+                x.Code.ToLower().Contains(normalizedSearch)
+                || x.FlowDefinition.Name.ToLower().Contains(normalizedSearch)
+                || x.StepExecutions.Any(step => step.Status == StepStatus.InProgress && step.FlowStep.Name.ToLower().Contains(normalizedSearch)));
+        }
+
+        var totalCount = await query.CountAsync(cancellationToken);
+        var pagedIds = await query
             .OrderByDescending(x => x.UpdatedAt)
-            .Take(200)
+            .Skip((normalizedPage - 1) * normalizedPageSize)
+            .Take(normalizedPageSize)
+            .Select(x => x.Id)
             .ToListAsync(cancellationToken);
 
-        var visibleRows = rows
-            .Where(row =>
-            {
-                var current = row.StepExecutions.SingleOrDefault(step => step.Status == StepStatus.InProgress);
-                return current is not null
-                    && !IsAutomaticStep(current.FlowStep.Type)
-                    && CanActOnStep(row.FlowDefinition, current.FlowStep, actorUserId);
-            })
-            .ToList();
+        if (pagedIds.Count == 0)
+        {
+            return new PagedResultDto<InstanceDto>([], totalCount, normalizedPage, normalizedPageSize);
+        }
 
-        var result = new List<InstanceDto>(visibleRows.Count);
-        foreach (var row in visibleRows)
+        var rows = await LoadInstance()
+            .AsNoTracking()
+            .Where(x => pagedIds.Contains(x.Id))
+            .ToListAsync(cancellationToken);
+
+        var orderLookup = pagedIds
+            .Select((id, index) => new { id, index })
+            .ToDictionary(x => x.id, x => x.index);
+
+        var result = new List<InstanceDto>(rows.Count);
+        foreach (var row in rows.OrderBy(item => orderLookup[item.Id]))
         {
             result.Add(await ToDtoAsync(row, cancellationToken));
         }
 
-        return result;
+        return new PagedResultDto<InstanceDto>(result, totalCount, normalizedPage, normalizedPageSize);
     }
 
     public async Task<InstanceDto> GetByIdAsync(Guid id, Guid? actorUserId, CancellationToken cancellationToken)

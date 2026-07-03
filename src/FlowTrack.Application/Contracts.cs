@@ -36,6 +36,7 @@ public record ExecutionFieldDto(Guid? Id, string Key, string Label, FieldType Ty
 public record StepProgressDto(Guid Id, Guid FlowStepId, string Name, int Order, StepType Type, StepStatus Status, DateTime? StartedAt, DateTime? CompletedAt, Guid? CompletedByUserId, string? CompletedByName, string? Notes, bool IsAutomatic, Dictionary<string, JsonElement> Data, IReadOnlyList<ExecutionFieldDto> Fields, IReadOnlyList<IntegrationAttemptDto> IntegrationAttempts);
 public record InstanceDto(Guid Id, Guid FlowDefinitionId, string FlowName, string Code, InstanceStatus Status, int CurrentStepOrder, DateTime CreatedAt, DateTime UpdatedAt, Dictionary<string, JsonElement> Data, Guid? CurrentStepExecutionId, IReadOnlyList<StepProgressDto> Steps);
 public record PdfExtractionDto(Dictionary<string, string> Fields, IReadOnlyList<string> Warnings);
+public record PagedResultDto<T>(IReadOnlyList<T> Items, int TotalCount, int Page, int PageSize);
 
 public interface IAppDbContext
 {
@@ -128,7 +129,7 @@ public interface IUserManagementService
 public interface IInstanceManagementService
 {
     Task<IReadOnlyList<InstanceDto>> GetAllAsync(Guid? flowId, string? status, string? search, Guid? actorUserId, CancellationToken cancellationToken);
-    Task<IReadOnlyList<InstanceDto>> GetPendingTasksAsync(Guid? actorUserId, CancellationToken cancellationToken);
+    Task<PagedResultDto<InstanceDto>> GetPendingTasksAsync(int page, int pageSize, string? search, Guid? actorUserId, CancellationToken cancellationToken);
     Task<InstanceDto> GetByIdAsync(Guid id, Guid? actorUserId, CancellationToken cancellationToken);
     Task<Guid> CreateAsync(CreateInstanceRequest request, Guid? actorUserId, CancellationToken cancellationToken);
     Task<InstanceDto> SaveCurrentStepDataAsync(Guid id, Dictionary<string, JsonElement> data, string? notes, Guid? actorUserId, CancellationToken cancellationToken);

@@ -23,9 +23,9 @@ public sealed class InstancesController(IInstanceManagementService instances) : 
     }
 
     [HttpGet("pending-tasks")]
-    public async Task<ActionResult<IReadOnlyList<InstanceDto>>> GetPendingTasks()
+    public async Task<ActionResult<PagedResultDto<InstanceDto>>> GetPendingTasks([FromQuery] int page = 1, [FromQuery] int pageSize = 10, [FromQuery] string? search = null)
     {
-        return Ok(await instances.GetPendingTasksAsync(TryGetCurrentUserId(), HttpContext.RequestAborted));
+        return Ok(await instances.GetPendingTasksAsync(page, pageSize, search, TryGetCurrentUserId(), HttpContext.RequestAborted));
     }
 
     [HttpGet("{id:guid}")]
