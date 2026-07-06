@@ -1,32 +1,48 @@
 using FlowTrack.Data;
 using FlowTrack.Domain;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace FlowTrack.API.Infrastructure;
 
 internal static class SeedData
 {
-    public static async Task InitializeAsync(IServiceProvider services)
+    public static async Task InitializeAsync(IServiceProvider services, IConfiguration configuration)
     {
         await using var scope = services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var logger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("SeedData");
         var passwords = scope.ServiceProvider.GetRequiredService<FlowTrack.Application.IPasswordService>();
         var tokenProtection = scope.ServiceProvider.GetRequiredService<FlowTrack.Application.ITokenProtectionService>();
 
         await db.Database.MigrateAsync();
         await EnsureIntegrationAttemptColumnsAsync(db);
 
-        if (!await db.AppUsers.AnyAsync(x => x.Email == "diogo@it4you.inf.br"))
+        var seedAdminEmail = configuration["Seed:AdminEmail"];
+        var seedAdminPassword = configuration["Seed:AdminPassword"];
+        var seedMinioEndpoint = configuration["Seed:Minio:Endpoint"];
+        var seedMinioPublicUrl = configuration["Seed:Minio:PublicUrl"];
+        var seedMinioAccessKey = configuration["Seed:Minio:AccessKey"];
+        var seedMinioSecretKey = configuration["Seed:Minio:SecretKey"];
+
+        if (!string.IsNullOrWhiteSpace(seedAdminEmail) &&
+            !string.IsNullOrWhiteSpace(seedAdminPassword) &&
+            !await db.AppUsers.AnyAsync(x => x.Email == seedAdminEmail))
         {
             var user = new AppUser
             {
                 Name = "Diogo",
-                Email = "diogo@it4you.inf.br",
+                Email = seedAdminEmail,
                 Role = UserRole.SuperAdmin
             };
-            user.PasswordHash = passwords.Hash(user, "Diogo#2026");
+            user.PasswordHash = passwords.Hash(user, seedAdminPassword);
             db.AppUsers.Add(user);
+        }
+        else if (string.IsNullOrWhiteSpace(seedAdminEmail) || string.IsNullOrWhiteSpace(seedAdminPassword))
+        {
+            logger.LogWarning("Seed do administrador ignorado porque Seed:AdminEmail ou Seed:AdminPassword nao foi configurado.");
         }
 
         if (!await db.FlowDefinitions.AnyAsync(x => x.Name == "Recebimento de caminhão / NF-e"))
@@ -96,27 +112,37 @@ internal static class SeedData
 
         if (minioConfig is null)
         {
-            minioConfig = new MinioConfiguration
+            if (string.IsNullOrWhiteSpace(seedMinioEndpoint) ||
+                string.IsNullOrWhiteSpace(seedMinioPublicUrl) ||
+                string.IsNullOrWhiteSpace(seedMinioAccessKey) ||
+                string.IsNullOrWhiteSpace(seedMinioSecretKey))
             {
-                Endpoint = "https://desenvolvimento-minio.ykzlki.easypanel.host",
-                PublicUrl = "https://desenvolvimento-minio.ykzlki.easypanel.host",
-                AccessKey = tokenProtection.Protect("admin"),
-                SecretKey = tokenProtection.Protect("VgrZtPnAiHmmUjEn"),
-                Active = true,
-                Buckets =
-                [
-                    new MinioBucket
-                    {
-                        Name = "Anexos gerais",
-                        BucketName = "coletoranexo",
-                        Description = "Bucket unico para anexos e fotos do FlowTrack.",
-                        Active = true,
-                        IsDefault = true
-                    }
-                ]
-            };
+                logger.LogWarning("Seed da configuracao MinIO ignorado porque Seed:Minio nao foi configurado.");
+            }
+            else
+            {
+                minioConfig = new MinioConfiguration
+                {
+                    Endpoint = seedMinioEndpoint,
+                    PublicUrl = seedMinioPublicUrl,
+                    AccessKey = tokenProtection.Protect(seedMinioAccessKey),
+                    SecretKey = tokenProtection.Protect(seedMinioSecretKey),
+                    Active = true,
+                    Buckets =
+                    [
+                        new MinioBucket
+                        {
+                            Name = "Anexos gerais",
+                            BucketName = "coletoranexo",
+                            Description = "Bucket unico para anexos e fotos do FlowTrack.",
+                            Active = true,
+                            IsDefault = true
+                        }
+                    ]
+                };
 
-            db.MinioConfigurationEntries.Add(minioConfig);
+                db.MinioConfigurationEntries.Add(minioConfig);
+            }
         }
         else if (!minioConfig.Buckets.Any())
         {
