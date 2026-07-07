@@ -16,7 +16,10 @@ public sealed class AuthController(IAuthService auth) : ControllerBase
         }
         catch (AppForbiddenException)
         {
-            return Unauthorized();
+            return Unauthorized(new
+            {
+                message = "E-mail ou senha incorretos. Verifique seus dados e tente novamente."
+            });
         }
     }
 }
