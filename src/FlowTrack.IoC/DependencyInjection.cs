@@ -182,7 +182,7 @@ internal sealed class IntegrationExecutionService(
             watch.Stop();
 
             var responseText = await response.Content.ReadAsStringAsync(cancellationToken);
-            var preview = Truncate(responseText);
+            var preview = responseText;
             var success = response.IsSuccessStatusCode;
             if (success && (step.Type == StepType.ApiQuery || step.Type == StepType.ApiSend))
             {
@@ -1318,7 +1318,7 @@ internal sealed class IntegrationExecutionService(
             CreatedAt = createdAt,
             RequestHeaders = Truncate(requestHeaders, 3900),
             RequestBody = Truncate(requestBody, 5900),
-            ResponsePreview = Truncate(preview),
+            ResponsePreview = string.IsNullOrWhiteSpace(preview) ? null : preview,
             ErrorMessage = string.IsNullOrWhiteSpace(error) ? null : Truncate(error, 900)
         };
 

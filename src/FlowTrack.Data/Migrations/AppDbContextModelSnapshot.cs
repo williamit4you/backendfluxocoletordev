@@ -290,8 +290,7 @@ namespace FlowTrack.Data.Migrations
                         .HasColumnType("text");
 
                     b.Property<string>("ResponsePreview")
-                        .HasMaxLength(2000)
-                        .HasColumnType("character varying(2000)");
+                        .HasColumnType("text");
 
                     b.Property<int?>("ResponseStatusCode")
                         .HasColumnType("integer");

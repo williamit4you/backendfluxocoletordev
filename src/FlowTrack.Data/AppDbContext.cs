@@ -84,7 +84,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
         b.Entity<IntegrationAttempt>().Property(x => x.Url).HasMaxLength(2000);
         b.Entity<IntegrationAttempt>().Property(x => x.RequestHeaders).HasColumnType("text");
         b.Entity<IntegrationAttempt>().Property(x => x.RequestBody).HasColumnType("text");
-        b.Entity<IntegrationAttempt>().Property(x => x.ResponsePreview).HasMaxLength(2000);
+        b.Entity<IntegrationAttempt>().Property(x => x.ResponsePreview).HasColumnType("text");
         b.Entity<IntegrationAttempt>().Property(x => x.ErrorMessage).HasMaxLength(1000);
         b.Entity<StepExecution>().Property(x => x.DataJson).HasColumnType("text");
         b.Entity<MinioConfiguration>().Property(x => x.Endpoint).HasMaxLength(500);
