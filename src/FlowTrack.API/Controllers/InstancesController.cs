@@ -49,6 +49,23 @@ public sealed class InstancesController(IInstanceManagementService instances) : 
         }
     }
 
+    [HttpGet("{id:guid}/steps/{stepExecutionId:guid}/integration-attempts")]
+    public async Task<ActionResult<PagedResultDto<IntegrationAttemptDto>>> GetStepIntegrationAttempts(Guid id, Guid stepExecutionId, [FromQuery] int page = 1, [FromQuery] int pageSize = 10)
+    {
+        try
+        {
+            return Ok(await instances.GetStepIntegrationAttemptsAsync(id, stepExecutionId, page, pageSize, TryGetCurrentUserId(), HttpContext.RequestAborted));
+        }
+        catch (AppNotFoundException)
+        {
+            return NotFound();
+        }
+        catch (AppForbiddenException ex)
+        {
+            return StatusCode(StatusCodes.Status403Forbidden, new { message = ex.Message });
+        }
+    }
+
     [HttpPost]
     public async Task<ActionResult<object>> Create([FromBody] CreateInstanceRequest request)
     {

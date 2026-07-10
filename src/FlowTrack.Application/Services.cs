@@ -1050,6 +1050,8 @@ public sealed class InstanceManagementService(
     IFileStorageService fileStorage,
     IPdfExtractionService pdfExtraction) : IInstanceManagementService
 {
+    private const int DefaultIntegrationAttemptsPageSize = 10;
+
     public async Task<IReadOnlyList<InstanceDto>> GetAllAsync(Guid? flowId, string? status, string? search, Guid? actorUserId, CancellationToken cancellationToken)
     {
         var query = db.Instances
@@ -1191,6 +1193,61 @@ public sealed class InstanceManagementService(
         }
 
         return await ToDtoAsync(item, cancellationToken);
+    }
+
+    public async Task<PagedResultDto<IntegrationAttemptDto>> GetStepIntegrationAttemptsAsync(Guid id, Guid stepExecutionId, int page, int pageSize, Guid? actorUserId, CancellationToken cancellationToken)
+    {
+        var item = await LoadInstance().AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
+            ?? throw new AppNotFoundException("ExecuÃ§Ã£o nÃ£o encontrada.");
+
+        if (!CanViewInstance(item, actorUserId))
+        {
+            throw new AppForbiddenException();
+        }
+
+        var stepExecution = item.StepExecutions.SingleOrDefault(x => x.Id == stepExecutionId)
+            ?? throw new AppNotFoundException("Etapa da execuÃ§Ã£o nÃ£o encontrada.");
+
+        var normalizedPage = Math.Max(page, 1);
+        var normalizedPageSize = pageSize switch
+        {
+            <= 10 => 10,
+            <= 50 => 50,
+            _ => 100
+        };
+
+        var baseQuery = db.IntegrationAttempts
+            .AsNoTracking()
+            .Where(x => x.FlowInstanceId == id && x.FlowStepId == stepExecution.FlowStepId);
+
+        var totalCount = await baseQuery.CountAsync(cancellationToken);
+        var skip = (normalizedPage - 1) * normalizedPageSize;
+        if (skip >= totalCount && totalCount > 0)
+        {
+            normalizedPage = Math.Max(1, (int)Math.Ceiling(totalCount / (double)normalizedPageSize));
+            skip = (normalizedPage - 1) * normalizedPageSize;
+        }
+
+        var attempts = await baseQuery
+            .OrderByDescending(x => x.CreatedAt)
+            .Skip(skip)
+            .Take(normalizedPageSize)
+            .Select(x => new IntegrationAttemptDto(
+                x.Id,
+                x.TriggerType.ToString(),
+                x.Method,
+                x.Url,
+                x.ResponseStatusCode,
+                x.Success,
+                x.DurationMs,
+                x.CreatedAt,
+                x.RequestHeaders,
+                x.RequestBody,
+                x.ResponsePreview,
+                x.ErrorMessage))
+            .ToListAsync(cancellationToken);
+
+        return new PagedResultDto<IntegrationAttemptDto>(attempts, totalCount, normalizedPage, normalizedPageSize);
     }
 
     public async Task<Guid> CreateAsync(CreateInstanceRequest request, Guid? actorUserId, CancellationToken cancellationToken)
@@ -2077,7 +2134,11 @@ public sealed class InstanceManagementService(
                 .Where(x => stepExecutionIds.Contains(x.StepExecutionId))
                 .OrderBy(x => x.UploadedAt)
                 .ToListAsync(cancellationToken);
-        var integrationAttemptsByStep = await LoadIntegrationAttemptsByStepAsync(item.Id, cancellationToken);
+        var integrationAttemptsByStep = await LoadIntegrationAttemptsByStepAsync(
+            item.Id,
+            item.StepExecutions.Select(x => x.FlowStepId).Distinct().ToArray(),
+            DefaultIntegrationAttemptsPageSize,
+            cancellationToken);
 
         var storedFileDtos = new Dictionary<Guid, List<UploadedFileDto>>();
         foreach (var file in storedFiles)
@@ -2151,52 +2212,67 @@ public sealed class InstanceManagementService(
                                     ? string.Join(", ", (storedFileDtos.TryGetValue(x.Id, out var uploadFiles) ? uploadFiles.Where(file => string.Equals(file.FieldKey, f.Key, StringComparison.OrdinalIgnoreCase)).Select(file => file.FileName) : Enumerable.Empty<string>()).ToArray())
                                     : enrichedData.TryGetValue(f.Key, out var fieldValue) ? fieldValue.ToString() : null))
                             .ToList(),
-                        integrationAttemptsByStep.TryGetValue(x.FlowStepId, out var attempts) ? attempts : []);
+                        integrationAttemptsByStep.TryGetValue(x.FlowStepId, out var attemptsPage) ? attemptsPage.Attempts : [],
+                        integrationAttemptsByStep.TryGetValue(x.FlowStepId, out var attemptsMeta) ? attemptsMeta.TotalCount : 0);
                 })
                 .ToList());
     }
 
-    private async Task<Dictionary<Guid, IReadOnlyList<IntegrationAttemptDto>>> LoadIntegrationAttemptsByStepAsync(Guid instanceId, CancellationToken cancellationToken)
+    private async Task<Dictionary<Guid, (IReadOnlyList<IntegrationAttemptDto> Attempts, int TotalCount)>> LoadIntegrationAttemptsByStepAsync(Guid instanceId, IReadOnlyList<Guid> flowStepIds, int pageSize, CancellationToken cancellationToken)
     {
-        var attempts = await db.IntegrationAttempts
+        if (flowStepIds.Count == 0)
+        {
+            return [];
+        }
+
+        var counts = await db.IntegrationAttempts
             .AsNoTracking()
-            .Where(x => x.FlowInstanceId == instanceId)
-            .OrderByDescending(x => x.CreatedAt)
-            .Select(x => new
+            .Where(x => x.FlowInstanceId == instanceId && flowStepIds.Contains(x.FlowStepId))
+            .GroupBy(x => x.FlowStepId)
+            .Select(group => new
             {
-                x.Id,
-                x.FlowStepId,
-                x.TriggerType,
-                x.Method,
-                x.Url,
-                x.ResponseStatusCode,
-                x.Success,
-                x.DurationMs,
-                x.CreatedAt,
-                x.ResponsePreview,
-                x.ErrorMessage
+                FlowStepId = group.Key,
+                TotalCount = group.Count()
             })
             .ToListAsync(cancellationToken);
 
-        return attempts
-            .GroupBy(x => x.FlowStepId)
-            .ToDictionary(
-                group => group.Key,
-                group => (IReadOnlyList<IntegrationAttemptDto>)group
-                    .Select(x => new IntegrationAttemptDto(
-                        x.Id,
-                        x.TriggerType.ToString(),
-                        x.Method,
-                        x.Url,
-                        x.ResponseStatusCode,
-                        x.Success,
-                        x.DurationMs,
-                        x.CreatedAt,
-                        null,
-                        null,
-                        x.ResponsePreview,
-                        x.ErrorMessage))
-                    .ToList());
+        var result = counts.ToDictionary(
+            x => x.FlowStepId,
+            x => ((IReadOnlyList<IntegrationAttemptDto>)[], x.TotalCount));
+
+        foreach (var flowStepId in flowStepIds)
+        {
+            var attempts = await db.IntegrationAttempts
+                .AsNoTracking()
+                .Where(x => x.FlowInstanceId == instanceId && x.FlowStepId == flowStepId)
+                .OrderByDescending(x => x.CreatedAt)
+                .Take(pageSize)
+                .Select(x => new IntegrationAttemptDto(
+                    x.Id,
+                    x.TriggerType.ToString(),
+                    x.Method,
+                    x.Url,
+                    x.ResponseStatusCode,
+                    x.Success,
+                    x.DurationMs,
+                    x.CreatedAt,
+                    null,
+                    null,
+                    x.ResponsePreview,
+                    x.ErrorMessage))
+                .ToListAsync(cancellationToken);
+
+            if (result.TryGetValue(flowStepId, out var current))
+            {
+                result[flowStepId] = (attempts, current.TotalCount);
+            }
+            else
+            {
+                result[flowStepId] = (attempts, 0);
+            }
+        }
+
+        return result;
     }
 }
 

@@ -33,7 +33,7 @@ public record UploadedFileDto(string Id, string FieldKey, string FileName, strin
 public record CreateInstanceRequest(Guid FlowDefinitionId, string? Code, Dictionary<string, JsonElement> Data);
 public record AdvanceStepRequest(string? Notes, Dictionary<string, JsonElement>? Data = null);
 public record ExecutionFieldDto(Guid? Id, string Key, string Label, FieldType Type, string? Mask, bool Required, int Order, IReadOnlyList<FieldOptionDto> Options, string? Value);
-public record StepProgressDto(Guid Id, Guid FlowStepId, string Name, int Order, StepType Type, StepStatus Status, DateTime? StartedAt, DateTime? CompletedAt, Guid? CompletedByUserId, string? CompletedByName, string? Notes, bool IsAutomatic, Dictionary<string, JsonElement> Data, IReadOnlyList<ExecutionFieldDto> Fields, IReadOnlyList<IntegrationAttemptDto> IntegrationAttempts);
+public record StepProgressDto(Guid Id, Guid FlowStepId, string Name, int Order, StepType Type, StepStatus Status, DateTime? StartedAt, DateTime? CompletedAt, Guid? CompletedByUserId, string? CompletedByName, string? Notes, bool IsAutomatic, Dictionary<string, JsonElement> Data, IReadOnlyList<ExecutionFieldDto> Fields, IReadOnlyList<IntegrationAttemptDto> IntegrationAttempts, int IntegrationAttemptsTotalCount);
 public record InstanceDto(Guid Id, Guid FlowDefinitionId, Guid FlowKey, string FlowName, int FlowVersionNumber, string FlowLifecycleStatus, bool IsCurrentFlowVersion, string Code, InstanceStatus Status, int CurrentStepOrder, DateTime CreatedAt, DateTime UpdatedAt, Dictionary<string, JsonElement> Data, Guid? CurrentStepExecutionId, IReadOnlyList<StepProgressDto> Steps);
 public record PdfExtractionDto(Dictionary<string, string> Fields, IReadOnlyList<string> Warnings);
 public record PagedResultDto<T>(IReadOnlyList<T> Items, int TotalCount, int Page, int PageSize);
@@ -131,6 +131,7 @@ public interface IInstanceManagementService
     Task<IReadOnlyList<InstanceDto>> GetAllAsync(Guid? flowId, string? status, string? search, Guid? actorUserId, CancellationToken cancellationToken);
     Task<PagedResultDto<InstanceDto>> GetPendingTasksAsync(int page, int pageSize, string? search, string? statusFilter, Guid? actorUserId, CancellationToken cancellationToken);
     Task<InstanceDto> GetByIdAsync(Guid id, Guid? actorUserId, CancellationToken cancellationToken);
+    Task<PagedResultDto<IntegrationAttemptDto>> GetStepIntegrationAttemptsAsync(Guid id, Guid stepExecutionId, int page, int pageSize, Guid? actorUserId, CancellationToken cancellationToken);
     Task<Guid> CreateAsync(CreateInstanceRequest request, Guid? actorUserId, CancellationToken cancellationToken);
     Task<InstanceDto> SaveCurrentStepDataAsync(Guid id, Dictionary<string, JsonElement> data, string? notes, Guid? actorUserId, CancellationToken cancellationToken);
     Task<InstanceDto> UploadCurrentStepFileAsync(Guid id, string fieldKey, string fileName, string? contentType, Stream stream, Guid? actorUserId, CancellationToken cancellationToken);
