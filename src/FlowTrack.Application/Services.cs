@@ -1323,11 +1323,19 @@ public sealed class InstanceManagementService(
             .AsNoTracking()
             .Where(x => x.FlowInstanceId == id && x.FlowStepId == stepExecution.FlowStepId);
 
-        var statusFilters = await baseQuery
+        var rawStatusFilters = await baseQuery
             .GroupBy(x => x.ResponseStatusCode)
-            .Select(group => new IntegrationAttemptStatusFilterDto(group.Key, group.Count()))
-            .OrderBy(x => x.StatusCode ?? int.MaxValue)
+            .Select(group => new
+            {
+                StatusCode = group.Key,
+                Count = group.Count()
+            })
             .ToListAsync(cancellationToken);
+
+        var statusFilters = rawStatusFilters
+            .Select(x => new IntegrationAttemptStatusFilterDto(x.StatusCode, x.Count))
+            .OrderBy(x => x.StatusCode ?? int.MaxValue)
+            .ToList();
 
         var normalizedStatusCodeFilter = statusCodeFilter?.Trim().ToLowerInvariant();
         var filteredQuery = normalizedStatusCodeFilter switch
@@ -2354,23 +2362,24 @@ public sealed class InstanceManagementService(
             })
             .ToListAsync(cancellationToken);
 
-        var statusFilters = await db.IntegrationAttempts
+        var rawStatusFilters = await db.IntegrationAttempts
             .AsNoTracking()
             .Where(x => x.FlowInstanceId == instanceId && flowStepIds.Contains(x.FlowStepId))
             .GroupBy(x => new { x.FlowStepId, x.ResponseStatusCode })
             .Select(group => new
             {
                 group.Key.FlowStepId,
-                Filter = new IntegrationAttemptStatusFilterDto(group.Key.ResponseStatusCode, group.Count())
+                group.Key.ResponseStatusCode,
+                Count = group.Count()
             })
             .ToListAsync(cancellationToken);
 
-        var filtersByStep = statusFilters
+        var filtersByStep = rawStatusFilters
             .GroupBy(x => x.FlowStepId)
             .ToDictionary(
                 group => group.Key,
                 group => (IReadOnlyList<IntegrationAttemptStatusFilterDto>)group
-                    .Select(x => x.Filter)
+                    .Select(x => new IntegrationAttemptStatusFilterDto(x.ResponseStatusCode, x.Count))
                     .OrderBy(x => x.StatusCode ?? int.MaxValue)
                     .ToList());
 
