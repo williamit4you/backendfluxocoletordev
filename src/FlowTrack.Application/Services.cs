@@ -1195,7 +1195,7 @@ public sealed class InstanceManagementService(
         return await ToDtoAsync(item, cancellationToken);
     }
 
-    public async Task<PagedResultDto<IntegrationAttemptDto>> GetStepIntegrationAttemptsAsync(Guid id, Guid stepExecutionId, int page, int pageSize, Guid? actorUserId, CancellationToken cancellationToken)
+    public async Task<PagedIntegrationAttemptResultDto> GetStepIntegrationAttemptsAsync(Guid id, Guid stepExecutionId, int page, int pageSize, int? statusCode, Guid? actorUserId, CancellationToken cancellationToken)
     {
         var item = await LoadInstance().AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
             ?? throw new AppNotFoundException("ExecuÃ§Ã£o nÃ£o encontrada.");
@@ -1220,7 +1220,17 @@ public sealed class InstanceManagementService(
             .AsNoTracking()
             .Where(x => x.FlowInstanceId == id && x.FlowStepId == stepExecution.FlowStepId);
 
-        var totalCount = await baseQuery.CountAsync(cancellationToken);
+        var statusFilters = await baseQuery
+            .GroupBy(x => x.ResponseStatusCode)
+            .Select(group => new IntegrationAttemptStatusFilterDto(group.Key, group.Count()))
+            .OrderBy(x => x.StatusCode ?? int.MaxValue)
+            .ToListAsync(cancellationToken);
+
+        var filteredQuery = statusCode.HasValue
+            ? baseQuery.Where(x => x.ResponseStatusCode == statusCode.Value)
+            : baseQuery;
+
+        var totalCount = await filteredQuery.CountAsync(cancellationToken);
         var skip = (normalizedPage - 1) * normalizedPageSize;
         if (skip >= totalCount && totalCount > 0)
         {
@@ -1228,7 +1238,7 @@ public sealed class InstanceManagementService(
             skip = (normalizedPage - 1) * normalizedPageSize;
         }
 
-        var attempts = await baseQuery
+        var attempts = await filteredQuery
             .OrderByDescending(x => x.CreatedAt)
             .Skip(skip)
             .Take(normalizedPageSize)
@@ -1247,7 +1257,7 @@ public sealed class InstanceManagementService(
                 x.ErrorMessage))
             .ToListAsync(cancellationToken);
 
-        return new PagedResultDto<IntegrationAttemptDto>(attempts, totalCount, normalizedPage, normalizedPageSize);
+        return new PagedIntegrationAttemptResultDto(attempts, totalCount, normalizedPage, normalizedPageSize, statusFilters);
     }
 
     public async Task<Guid> CreateAsync(CreateInstanceRequest request, Guid? actorUserId, CancellationToken cancellationToken)
@@ -2213,12 +2223,13 @@ public sealed class InstanceManagementService(
                                     : enrichedData.TryGetValue(f.Key, out var fieldValue) ? fieldValue.ToString() : null))
                             .ToList(),
                         integrationAttemptsByStep.TryGetValue(x.FlowStepId, out var attemptsPage) ? attemptsPage.Attempts : [],
-                        integrationAttemptsByStep.TryGetValue(x.FlowStepId, out var attemptsMeta) ? attemptsMeta.TotalCount : 0);
+                        integrationAttemptsByStep.TryGetValue(x.FlowStepId, out var attemptsMeta) ? attemptsMeta.TotalCount : 0,
+                        integrationAttemptsByStep.TryGetValue(x.FlowStepId, out var attemptsFilters) ? attemptsFilters.StatusFilters : []);
                 })
                 .ToList());
     }
 
-    private async Task<Dictionary<Guid, (IReadOnlyList<IntegrationAttemptDto> Attempts, int TotalCount)>> LoadIntegrationAttemptsByStepAsync(Guid instanceId, IReadOnlyList<Guid> flowStepIds, int pageSize, CancellationToken cancellationToken)
+    private async Task<Dictionary<Guid, (IReadOnlyList<IntegrationAttemptDto> Attempts, int TotalCount, IReadOnlyList<IntegrationAttemptStatusFilterDto> StatusFilters)>> LoadIntegrationAttemptsByStepAsync(Guid instanceId, IReadOnlyList<Guid> flowStepIds, int pageSize, CancellationToken cancellationToken)
     {
         if (flowStepIds.Count == 0)
         {
@@ -2236,9 +2247,32 @@ public sealed class InstanceManagementService(
             })
             .ToListAsync(cancellationToken);
 
+        var statusFilters = await db.IntegrationAttempts
+            .AsNoTracking()
+            .Where(x => x.FlowInstanceId == instanceId && flowStepIds.Contains(x.FlowStepId))
+            .GroupBy(x => new { x.FlowStepId, x.ResponseStatusCode })
+            .Select(group => new
+            {
+                group.Key.FlowStepId,
+                Filter = new IntegrationAttemptStatusFilterDto(group.Key.ResponseStatusCode, group.Count())
+            })
+            .ToListAsync(cancellationToken);
+
+        var filtersByStep = statusFilters
+            .GroupBy(x => x.FlowStepId)
+            .ToDictionary(
+                group => group.Key,
+                group => (IReadOnlyList<IntegrationAttemptStatusFilterDto>)group
+                    .Select(x => x.Filter)
+                    .OrderBy(x => x.StatusCode ?? int.MaxValue)
+                    .ToList());
+
         var result = counts.ToDictionary(
             x => x.FlowStepId,
-            x => ((IReadOnlyList<IntegrationAttemptDto>)[], x.TotalCount));
+            x => (
+                Attempts: (IReadOnlyList<IntegrationAttemptDto>)[],
+                TotalCount: x.TotalCount,
+                StatusFilters: filtersByStep.TryGetValue(x.FlowStepId, out var filters) ? filters : []));
 
         foreach (var flowStepId in flowStepIds)
         {
@@ -2264,11 +2298,14 @@ public sealed class InstanceManagementService(
 
             if (result.TryGetValue(flowStepId, out var current))
             {
-                result[flowStepId] = (attempts, current.TotalCount);
+                result[flowStepId] = (Attempts: attempts, TotalCount: current.TotalCount, StatusFilters: current.StatusFilters);
             }
             else
             {
-                result[flowStepId] = (attempts, 0);
+                result[flowStepId] = (
+                    Attempts: attempts,
+                    TotalCount: 0,
+                    StatusFilters: filtersByStep.TryGetValue(flowStepId, out var filters) ? filters : []);
             }
         }
 
