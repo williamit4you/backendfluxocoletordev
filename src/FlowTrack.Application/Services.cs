@@ -1298,7 +1298,7 @@ public sealed class InstanceManagementService(
         return await ToDtoAsync(item, cancellationToken);
     }
 
-    public async Task<PagedIntegrationAttemptResultDto> GetStepIntegrationAttemptsAsync(Guid id, Guid stepExecutionId, int page, int pageSize, int? statusCode, Guid? actorUserId, CancellationToken cancellationToken)
+    public async Task<PagedIntegrationAttemptResultDto> GetStepIntegrationAttemptsAsync(Guid id, Guid stepExecutionId, int page, int pageSize, string? statusCodeFilter, Guid? actorUserId, CancellationToken cancellationToken)
     {
         var item = await LoadInstance().AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
             ?? throw new AppNotFoundException("ExecuÃ§Ã£o nÃ£o encontrada.");
@@ -1329,9 +1329,13 @@ public sealed class InstanceManagementService(
             .OrderBy(x => x.StatusCode ?? int.MaxValue)
             .ToListAsync(cancellationToken);
 
-        var filteredQuery = statusCode.HasValue
-            ? baseQuery.Where(x => x.ResponseStatusCode == statusCode.Value)
-            : baseQuery;
+        var normalizedStatusCodeFilter = statusCodeFilter?.Trim().ToLowerInvariant();
+        var filteredQuery = normalizedStatusCodeFilter switch
+        {
+            "none" => baseQuery.Where(x => x.ResponseStatusCode == null),
+            not null when int.TryParse(normalizedStatusCodeFilter, out var parsedStatusCode) => baseQuery.Where(x => x.ResponseStatusCode == parsedStatusCode),
+            _ => baseQuery
+        };
 
         var totalCount = await filteredQuery.CountAsync(cancellationToken);
         var skip = (normalizedPage - 1) * normalizedPageSize;

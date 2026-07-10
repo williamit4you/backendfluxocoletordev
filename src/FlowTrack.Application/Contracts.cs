@@ -135,7 +135,7 @@ public interface IInstanceManagementService
     Task<DashboardInstancesResultDto> GetDashboardInstancesAsync(Guid flowId, int page, int pageSize, string? status, string? search, DateTime? startDate, Guid? actorUserId, CancellationToken cancellationToken);
     Task<PagedResultDto<InstanceDto>> GetPendingTasksAsync(int page, int pageSize, string? search, string? statusFilter, Guid? actorUserId, CancellationToken cancellationToken);
     Task<InstanceDto> GetByIdAsync(Guid id, Guid? actorUserId, CancellationToken cancellationToken);
-    Task<PagedIntegrationAttemptResultDto> GetStepIntegrationAttemptsAsync(Guid id, Guid stepExecutionId, int page, int pageSize, int? statusCode, Guid? actorUserId, CancellationToken cancellationToken);
+    Task<PagedIntegrationAttemptResultDto> GetStepIntegrationAttemptsAsync(Guid id, Guid stepExecutionId, int page, int pageSize, string? statusCodeFilter, Guid? actorUserId, CancellationToken cancellationToken);
     Task<Guid> CreateAsync(CreateInstanceRequest request, Guid? actorUserId, CancellationToken cancellationToken);
     Task<InstanceDto> SaveCurrentStepDataAsync(Guid id, Dictionary<string, JsonElement> data, string? notes, Guid? actorUserId, CancellationToken cancellationToken);
     Task<InstanceDto> UploadCurrentStepFileAsync(Guid id, string fieldKey, string fileName, string? contentType, Stream stream, Guid? actorUserId, CancellationToken cancellationToken);

@@ -62,7 +62,7 @@ public sealed class InstancesController(IInstanceManagementService instances) : 
     }
 
     [HttpGet("{id:guid}/steps/{stepExecutionId:guid}/integration-attempts")]
-    public async Task<ActionResult<PagedIntegrationAttemptResultDto>> GetStepIntegrationAttempts(Guid id, Guid stepExecutionId, [FromQuery] int page = 1, [FromQuery] int pageSize = 10, [FromQuery] int? statusCode = null)
+    public async Task<ActionResult<PagedIntegrationAttemptResultDto>> GetStepIntegrationAttempts(Guid id, Guid stepExecutionId, [FromQuery] int page = 1, [FromQuery] int pageSize = 10, [FromQuery] string? statusCode = null)
     {
         try
         {
