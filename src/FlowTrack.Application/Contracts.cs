@@ -39,6 +39,7 @@ public record InstanceDto(Guid Id, Guid FlowDefinitionId, Guid FlowKey, string F
 public record PdfExtractionDto(Dictionary<string, string> Fields, IReadOnlyList<string> Warnings);
 public record PagedResultDto<T>(IReadOnlyList<T> Items, int TotalCount, int Page, int PageSize);
 public record PagedIntegrationAttemptResultDto(IReadOnlyList<IntegrationAttemptDto> Items, int TotalCount, int Page, int PageSize, IReadOnlyList<IntegrationAttemptStatusFilterDto> AvailableStatusCodes);
+public record DashboardInstancesResultDto(IReadOnlyList<InstanceDto> Items, int TotalCount, int Page, int PageSize, int InProgressCount, int CompletedCount, int CancelledCount);
 
 public interface IAppDbContext
 {
@@ -131,6 +132,7 @@ public interface IUserManagementService
 public interface IInstanceManagementService
 {
     Task<IReadOnlyList<InstanceDto>> GetAllAsync(Guid? flowId, string? status, string? search, Guid? actorUserId, CancellationToken cancellationToken);
+    Task<DashboardInstancesResultDto> GetDashboardInstancesAsync(Guid flowId, int page, int pageSize, string? status, string? search, DateTime? startDate, Guid? actorUserId, CancellationToken cancellationToken);
     Task<PagedResultDto<InstanceDto>> GetPendingTasksAsync(int page, int pageSize, string? search, string? statusFilter, Guid? actorUserId, CancellationToken cancellationToken);
     Task<InstanceDto> GetByIdAsync(Guid id, Guid? actorUserId, CancellationToken cancellationToken);
     Task<PagedIntegrationAttemptResultDto> GetStepIntegrationAttemptsAsync(Guid id, Guid stepExecutionId, int page, int pageSize, int? statusCode, Guid? actorUserId, CancellationToken cancellationToken);

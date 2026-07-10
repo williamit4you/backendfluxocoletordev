@@ -22,6 +22,18 @@ public sealed class InstancesController(IInstanceManagementService instances) : 
         return Ok(await instances.GetAllAsync(flowId, status, search, TryGetCurrentUserId(), HttpContext.RequestAborted));
     }
 
+    [HttpGet("dashboard")]
+    public async Task<ActionResult<DashboardInstancesResultDto>> GetDashboard(
+        [FromQuery] Guid flowId,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 10,
+        [FromQuery] string? status = null,
+        [FromQuery] string? search = null,
+        [FromQuery] DateTime? startDate = null)
+    {
+        return Ok(await instances.GetDashboardInstancesAsync(flowId, page, pageSize, status, search, startDate, TryGetCurrentUserId(), HttpContext.RequestAborted));
+    }
+
     [HttpGet("pending-tasks")]
     public async Task<ActionResult<PagedResultDto<InstanceDto>>> GetPendingTasks([FromQuery] int page = 1, [FromQuery] int pageSize = 10, [FromQuery] string? search = null, [FromQuery] string? statusFilter = null)
     {

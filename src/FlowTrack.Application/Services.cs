@@ -1099,6 +1099,109 @@ public sealed class InstanceManagementService(
         return result;
     }
 
+    public async Task<DashboardInstancesResultDto> GetDashboardInstancesAsync(Guid flowId, int page, int pageSize, string? status, string? search, DateTime? startDate, Guid? actorUserId, CancellationToken cancellationToken)
+    {
+        var selectedFlow = await db.Flows
+            .AsNoTracking()
+            .SingleOrDefaultAsync(x => x.Id == flowId, cancellationToken)
+            ?? throw new AppNotFoundException("Fluxo não encontrado.");
+
+        var normalizedPage = page < 1 ? 1 : page;
+        var normalizedPageSize = pageSize switch
+        {
+            <= 10 => 10,
+            <= 50 => 50,
+            _ => 100
+        };
+        var normalizedSearch = search?.Trim().ToLowerInvariant();
+
+        var query = db.Instances
+            .AsNoTracking()
+            .Where(x => x.FlowDefinition.FlowKey == selectedFlow.FlowKey);
+
+        if (startDate.HasValue)
+        {
+            var startDateUtc = DateTime.SpecifyKind(startDate.Value.Date, DateTimeKind.Utc);
+            query = query.Where(x => x.CreatedAt >= startDateUtc);
+        }
+
+        if (!string.IsNullOrWhiteSpace(normalizedSearch))
+        {
+            query = query.Where(x => x.Code.ToLower().Contains(normalizedSearch));
+        }
+
+        var visibleIds = actorUserId.HasValue
+            ? await query
+                .Where(x =>
+                    x.StepExecutions.Any(step => step.CompletedByUserId == actorUserId.Value)
+                    || x.StepExecutions.Any(step => step.FlowStep.AssignedUserId == actorUserId.Value || step.FlowStep.AssignedUsers.Any(user => user.UserId == actorUserId.Value))
+                    || x.FlowDefinition.AssignedUsers.Any(user => user.UserId == actorUserId.Value)
+                    || !x.FlowDefinition.AssignedUsers.Any())
+                .Select(x => x.Id)
+                .ToListAsync(cancellationToken)
+            : await query.Select(x => x.Id).ToListAsync(cancellationToken);
+
+        var visibleIdsSet = visibleIds.ToHashSet();
+
+        var filteredQuery = db.Instances
+            .AsNoTracking()
+            .Where(x => visibleIdsSet.Contains(x.Id));
+
+        var groupedCounts = await filteredQuery
+            .GroupBy(x => x.Status)
+            .Select(group => new { Status = group.Key, Count = group.Count() })
+            .ToListAsync(cancellationToken);
+
+        if (Enum.TryParse<InstanceStatus>(status, true, out var parsedStatus))
+        {
+            filteredQuery = filteredQuery.Where(x => x.Status == parsedStatus);
+        }
+
+        var totalCount = await filteredQuery.CountAsync(cancellationToken);
+        var pagedIds = await filteredQuery
+            .OrderByDescending(x => x.UpdatedAt)
+            .Skip((normalizedPage - 1) * normalizedPageSize)
+            .Take(normalizedPageSize)
+            .Select(x => x.Id)
+            .ToListAsync(cancellationToken);
+
+        if (pagedIds.Count == 0)
+        {
+            return new DashboardInstancesResultDto(
+                [],
+                totalCount,
+                normalizedPage,
+                normalizedPageSize,
+                groupedCounts.FirstOrDefault(x => x.Status == InstanceStatus.InProgress)?.Count ?? 0,
+                groupedCounts.FirstOrDefault(x => x.Status == InstanceStatus.Completed)?.Count ?? 0,
+                groupedCounts.FirstOrDefault(x => x.Status == InstanceStatus.Cancelled)?.Count ?? 0);
+        }
+
+        var rows = await LoadInstance()
+            .AsNoTracking()
+            .Where(x => pagedIds.Contains(x.Id))
+            .ToListAsync(cancellationToken);
+
+        var orderLookup = pagedIds
+            .Select((id, index) => new { id, index })
+            .ToDictionary(x => x.id, x => x.index);
+
+        var result = new List<InstanceDto>(rows.Count);
+        foreach (var row in rows.OrderBy(item => orderLookup[item.Id]))
+        {
+            result.Add(await ToDtoAsync(row, cancellationToken));
+        }
+
+        return new DashboardInstancesResultDto(
+            result,
+            totalCount,
+            normalizedPage,
+            normalizedPageSize,
+            groupedCounts.FirstOrDefault(x => x.Status == InstanceStatus.InProgress)?.Count ?? 0,
+            groupedCounts.FirstOrDefault(x => x.Status == InstanceStatus.Completed)?.Count ?? 0,
+            groupedCounts.FirstOrDefault(x => x.Status == InstanceStatus.Cancelled)?.Count ?? 0);
+    }
+
     public async Task<PagedResultDto<InstanceDto>> GetPendingTasksAsync(int page, int pageSize, string? search, string? statusFilter, Guid? actorUserId, CancellationToken cancellationToken)
     {
         var normalizedPage = page < 1 ? 1 : page;
