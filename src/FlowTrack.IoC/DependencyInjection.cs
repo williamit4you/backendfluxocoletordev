@@ -265,12 +265,17 @@ internal sealed class IntegrationExecutionService(
         catch (Exception ex)
         {
             watch.Stop();
+            var attemptCount = await CountRuntimeAttemptsAsync(instance, step.Id, triggerType, cancellationToken) + 1;
+            var transportRuleEvaluation = EvaluateTransportErrorRule(config, ex.Message, attemptCount, DateTime.UtcNow);
+            var shouldAwaitTransportRetry = transportRuleEvaluation?.Action == "retry";
+            var shouldAdvanceAfterTransportError = transportRuleEvaluation?.Action == "advance";
+
             return await SaveAttemptAsync(
                 step,
                 triggerType,
                 method,
                 SanitizeUrl(resolvedUrl),
-                false,
+                shouldAdvanceAfterTransportError,
                 null,
                 (int)watch.ElapsedMilliseconds,
                 requestHeadersPreview,
@@ -278,10 +283,10 @@ internal sealed class IntegrationExecutionService(
                 null,
                 Truncate(ex.Message, 400),
                 null,
-                false,
-                null,
-                null,
-                null,
+                shouldAwaitTransportRetry,
+                shouldAwaitTransportRetry ? transportRuleEvaluation?.Reason : null,
+                shouldAwaitTransportRetry ? transportRuleEvaluation?.RetryIntervalMinutes : null,
+                transportRuleEvaluation,
                 instance,
                 stepExecution,
                 cancellationToken);
@@ -705,6 +710,77 @@ internal sealed class IntegrationExecutionService(
         }
 
         return new ResponseRuleEvaluationDto(true, "failed", "fail", reason, targetPath, expectedType, true, attemptCount, rule.MaxAttempts, rule.RetryIntervalMinutes, Mode: NormalizeRuleMode(rule.Mode));
+    }
+
+    private static ResponseRuleEvaluationDto? EvaluateTransportErrorRule(StepApiConfigDto config, string? errorMessage, int attemptCount, DateTime nowUtc)
+    {
+        var rule = BuildRuntimeResponseRule(config);
+        var action = NormalizeRuleBehavior(rule.TransportErrorBehavior, "fail");
+        var reason = $"Erro de transporte: {Truncate(errorMessage, 300)}";
+
+        if (action == "retry")
+        {
+            var maxAttempts = Math.Clamp(rule.TransportMaxAttempts ?? rule.MaxAttempts ?? 20, 1, 100000);
+            if (attemptCount >= maxAttempts)
+            {
+                return new ResponseRuleEvaluationDto(
+                    true,
+                    "failed",
+                    "fail",
+                    $"Limite de {maxAttempts} tentativa(s) atingido apos erro de transporte. Ultimo erro: {Truncate(errorMessage, 220)}.",
+                    "$transport",
+                    "any",
+                    true,
+                    attemptCount,
+                    maxAttempts,
+                    rule.TransportRetryIntervalMinutes ?? rule.RetryIntervalMinutes,
+                    Mode: "transportError");
+            }
+
+            var retryMinutes = Math.Clamp(rule.TransportRetryIntervalMinutes ?? rule.RetryIntervalMinutes ?? 3, 1, 10080);
+            return new ResponseRuleEvaluationDto(
+                true,
+                "waiting",
+                "retry",
+                $"{reason}. Nova tentativa em {retryMinutes} minuto(s).",
+                "$transport",
+                "any",
+                true,
+                attemptCount,
+                maxAttempts,
+                retryMinutes,
+                nowUtc.AddMinutes(retryMinutes),
+                Mode: "transportError");
+        }
+
+        if (action == "advance")
+        {
+            return new ResponseRuleEvaluationDto(
+                true,
+                "matched",
+                "advance",
+                $"{reason}. Etapa configurada para avancar mesmo sem resposta HTTP.",
+                "$transport",
+                "any",
+                true,
+                attemptCount,
+                rule.TransportMaxAttempts,
+                rule.TransportRetryIntervalMinutes,
+                Mode: "transportError");
+        }
+
+        return new ResponseRuleEvaluationDto(
+            true,
+            "failed",
+            "fail",
+            reason,
+            "$transport",
+            "any",
+            true,
+            attemptCount,
+            rule.TransportMaxAttempts,
+            rule.TransportRetryIntervalMinutes,
+            Mode: "transportError");
     }
 
     private static ResponseRuleDto BuildRuntimeResponseRule(StepApiConfigDto config)
@@ -1509,6 +1585,14 @@ internal sealed class InstanceAutomationService(
             current.DataJson = JsonSerializer.Serialize(currentData);
             item.DataJson = JsonSerializer.Serialize(currentData);
 
+            if ((stepType == StepType.ApiQuery || stepType == StepType.ApiSend) && result.AwaitingData)
+            {
+                current.Notes = result.AwaitingDataMessage;
+                item.UpdatedAt = DateTime.UtcNow;
+                await db.SaveChangesAsync(cancellationToken);
+                return;
+            }
+
             if (!result.Success)
             {
                 logger.LogWarning("Falha de integracao na instancia {InstanceId}, etapa {StepId}: {Error}", item.Id, current.FlowStepId, result.ErrorMessage);
@@ -1519,15 +1603,10 @@ internal sealed class InstanceAutomationService(
                 return;
             }
 
-            if ((stepType == StepType.ApiQuery || stepType == StepType.ApiSend) && result.AwaitingData)
-            {
-                current.Notes = result.AwaitingDataMessage;
-                item.UpdatedAt = DateTime.UtcNow;
-                await db.SaveChangesAsync(cancellationToken);
-                return;
-            }
-
-            CompleteCurrentStep(item, current, "Etapa de integracao concluida automaticamente.", null);
+            var completionNotes = result.ResponseRuleEvaluation?.Mode == "transportError" && result.ResponseRuleEvaluation.Action == "advance"
+                ? result.ResponseRuleEvaluation.Reason
+                : "Etapa de integracao concluida automaticamente.";
+            CompleteCurrentStep(item, current, completionNotes, null);
             await db.SaveChangesAsync(cancellationToken);
             forceFailedCurrent = false;
         }

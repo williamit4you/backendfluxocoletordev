@@ -489,6 +489,25 @@ public sealed class FlowManagementService(
         {
             throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' possui operador inválido para o tipo esperado na regra de retorno."] });
         }
+
+        if (responseRule.TransportErrorBehavior == "retry")
+        {
+            if (step.Type != StepType.ApiQuery && step.Type != StepType.ApiSend)
+            {
+                throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' só pode usar nova tentativa em erro de transporte para API de envio ou API de consulta."] });
+            }
+
+            var transportRetryMinutes = responseRule.TransportRetryIntervalMinutes ?? 0;
+            if (transportRetryMinutes < 1 || transportRetryMinutes > 10080)
+            {
+                throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' precisa ter intervalo de nova tentativa em erro de transporte entre 1 e 10080 minutos."] });
+            }
+        }
+
+        if (responseRule.TransportErrorBehavior == "retry" && responseRule.TransportMaxAttempts is < 1 or > MaxResponseRuleAttempts)
+        {
+            throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' precisa ter limite de tentativas em erro de transporte entre 1 e {MaxResponseRuleAttempts}."] });
+        }
     }
 
     private static StepApiConfigDto NormalizeApiConfig(StepApiConfigDto config)
@@ -560,6 +579,13 @@ public sealed class FlowManagementService(
             ? Math.Clamp(source?.MaxAttempts ?? 20, 1, MaxResponseRuleAttempts)
             : source?.MaxAttempts;
         var operatorName = NormalizeConditionOperator(source?.Operator, expectedType);
+        var transportErrorBehavior = NormalizeRuleBehavior(source?.TransportErrorBehavior ?? "fail", "fail");
+        int? transportRetryInterval = transportErrorBehavior == "retry"
+            ? Math.Clamp(source?.TransportRetryIntervalMinutes ?? source?.RetryIntervalMinutes ?? config.EmptyArrayRetryMinutes ?? 3, 1, 10080)
+            : null;
+        int? transportMaxAttempts = transportErrorBehavior == "retry"
+            ? Math.Clamp(source?.TransportMaxAttempts ?? source?.MaxAttempts ?? 20, 1, MaxResponseRuleAttempts)
+            : source?.TransportMaxAttempts;
 
         return new ResponseRuleDto(
             enabled,
@@ -576,7 +602,10 @@ public sealed class FlowManagementService(
             string.IsNullOrWhiteSpace(source?.ExpectedValue) ? null : source.ExpectedValue.Trim(),
             source?.CaseSensitive ?? false,
             onMatchBehavior,
-            onMismatchBehavior);
+            onMismatchBehavior,
+            transportErrorBehavior,
+            transportRetryInterval,
+            transportMaxAttempts);
     }
 
     private static string NormalizeRuleMode(string? value)
