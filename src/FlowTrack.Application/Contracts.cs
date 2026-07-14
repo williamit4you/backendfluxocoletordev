@@ -6,7 +6,7 @@ namespace FlowTrack.Application;
 
 public record LoginRequest(string Email, string Password);
 public record LoginResponse(string Token, UserDto User);
-public record ChangeOwnPasswordRequest(string CurrentPassword, string NewPassword, string ConfirmPassword);
+public record ChangeOwnPasswordRequest(string NewPassword, string ConfirmPassword);
 public record UserDto(Guid Id, string Name, string Email, string Role, bool Active);
 public record CreateUserRequest(string Name, string Email, string Password, string Role);
 public record UpdateUserRequest(string Name, string Role, bool Active, string? Password);

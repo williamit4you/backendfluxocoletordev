@@ -967,11 +967,10 @@ public sealed class AuthService(
 
     public async Task ChangeOwnPasswordAsync(Guid currentUserId, ChangeOwnPasswordRequest request, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(request.CurrentPassword)
-            || string.IsNullOrWhiteSpace(request.NewPassword)
+        if (string.IsNullOrWhiteSpace(request.NewPassword)
             || string.IsNullOrWhiteSpace(request.ConfirmPassword))
         {
-            throw new AppValidationException(new Dictionary<string, string[]> { ["password"] = ["Senha atual, nova senha e confirmação são obrigatórias."] });
+            throw new AppValidationException(new Dictionary<string, string[]> { ["password"] = ["Nova senha e confirmação são obrigatórias."] });
         }
 
         if (request.NewPassword.Length < 8)
@@ -986,11 +985,6 @@ public sealed class AuthService(
 
         var user = await db.Users.SingleOrDefaultAsync(x => x.Id == currentUserId && x.Active, cancellationToken)
             ?? throw new AppForbiddenException("Usuário inválido.");
-
-        if (!passwords.Verify(user, user.PasswordHash, request.CurrentPassword))
-        {
-            throw new AppValidationException(new Dictionary<string, string[]> { ["currentPassword"] = ["A senha atual informada está incorreta."] });
-        }
 
         if (passwords.Verify(user, user.PasswordHash, request.NewPassword))
         {
