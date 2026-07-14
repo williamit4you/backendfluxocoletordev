@@ -946,7 +946,8 @@ public sealed class FlowManagementService(
 public sealed class AuthService(
     IAppDbContext db,
     IPasswordService passwords,
-    ITokenService tokens) : IAuthService
+    ITokenService tokens,
+    IAuditService audit) : IAuthService
 {
     public async Task<LoginResponse> LoginAsync(LoginRequest request, CancellationToken cancellationToken)
     {
@@ -962,6 +963,43 @@ public sealed class AuthService(
         return new LoginResponse(
             tokens.Create(user),
             new UserDto(user.Id, user.Name, user.Email, user.Role.ToString(), user.Active));
+    }
+
+    public async Task ChangeOwnPasswordAsync(Guid currentUserId, ChangeOwnPasswordRequest request, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(request.CurrentPassword)
+            || string.IsNullOrWhiteSpace(request.NewPassword)
+            || string.IsNullOrWhiteSpace(request.ConfirmPassword))
+        {
+            throw new AppValidationException(new Dictionary<string, string[]> { ["password"] = ["Senha atual, nova senha e confirmação são obrigatórias."] });
+        }
+
+        if (request.NewPassword.Length < 8)
+        {
+            throw new AppValidationException(new Dictionary<string, string[]> { ["newPassword"] = ["A nova senha deve ter ao menos 8 caracteres."] });
+        }
+
+        if (!string.Equals(request.NewPassword, request.ConfirmPassword, StringComparison.Ordinal))
+        {
+            throw new AppValidationException(new Dictionary<string, string[]> { ["confirmPassword"] = ["A confirmação da senha não confere."] });
+        }
+
+        var user = await db.Users.SingleOrDefaultAsync(x => x.Id == currentUserId && x.Active, cancellationToken)
+            ?? throw new AppForbiddenException("Usuário inválido.");
+
+        if (!passwords.Verify(user, user.PasswordHash, request.CurrentPassword))
+        {
+            throw new AppValidationException(new Dictionary<string, string[]> { ["currentPassword"] = ["A senha atual informada está incorreta."] });
+        }
+
+        if (passwords.Verify(user, user.PasswordHash, request.NewPassword))
+        {
+            throw new AppValidationException(new Dictionary<string, string[]> { ["newPassword"] = ["A nova senha precisa ser diferente da senha atual."] });
+        }
+
+        user.PasswordHash = passwords.Hash(user, request.NewPassword);
+        await db.SaveChangesAsync(cancellationToken);
+        await audit.WriteAsync("Auth", "ChangeOwnPassword", "AppUser", user.Id, $"Usuário '{user.Email}' alterou a própria senha.", user.Id, cancellationToken);
     }
 }
 

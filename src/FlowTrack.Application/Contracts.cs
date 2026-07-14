@@ -6,6 +6,7 @@ namespace FlowTrack.Application;
 
 public record LoginRequest(string Email, string Password);
 public record LoginResponse(string Token, UserDto User);
+public record ChangeOwnPasswordRequest(string CurrentPassword, string NewPassword, string ConfirmPassword);
 public record UserDto(Guid Id, string Name, string Email, string Role, bool Active);
 public record CreateUserRequest(string Name, string Email, string Password, string Role);
 public record UpdateUserRequest(string Name, string Role, bool Active, string? Password);
@@ -66,7 +67,11 @@ public interface IAppDbContext
 public interface ITokenService { string Create(AppUser user); }
 public interface IPasswordService { string Hash(AppUser user, string password); bool Verify(AppUser user, string hash, string password); }
 public interface IPdfExtractionService { Task<PdfExtractionDto> ExtractAsync(Stream stream, CancellationToken cancellationToken); }
-public interface IAuthService { Task<LoginResponse> LoginAsync(LoginRequest request, CancellationToken cancellationToken); }
+public interface IAuthService
+{
+    Task<LoginResponse> LoginAsync(LoginRequest request, CancellationToken cancellationToken);
+    Task ChangeOwnPasswordAsync(Guid currentUserId, ChangeOwnPasswordRequest request, CancellationToken cancellationToken);
+}
 public interface ITokenProtectionService
 {
     string Protect(string plainText);
