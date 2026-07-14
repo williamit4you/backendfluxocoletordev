@@ -200,11 +200,16 @@ internal sealed class IntegrationExecutionService(
                 ? MapResponseData(config, responseText)
                 : null;
             var attemptCount = await CountRuntimeAttemptsAsync(instance, step.Id, triggerType, cancellationToken) + 1;
+            var nowUtc = DateTime.UtcNow;
             var ruleEvaluation = success && (step.Type == StepType.ApiQuery || step.Type == StepType.ApiSend)
-                ? EvaluateResponseRule(config, responseText, attemptCount, DateTime.UtcNow)
-                : null;
+                ? EvaluateResponseRule(config, responseText, attemptCount, nowUtc)
+                : !success
+                    ? EvaluateHttpErrorRule(config, response.StatusCode, responseText, attemptCount, nowUtc)
+                    : null;
             var awaitingData = ruleEvaluation?.Action == "retry";
-            var semanticSuccess = success && ruleEvaluation?.Action != "fail";
+            var semanticSuccess = success
+                ? ruleEvaluation?.Action != "fail"
+                : ruleEvaluation?.Action == "advance";
             var semanticError = semanticSuccess
                 ? null
                 : ruleEvaluation?.Reason ?? $"Resposta HTTP {(int)response.StatusCode}.";
@@ -212,7 +217,15 @@ internal sealed class IntegrationExecutionService(
                 ? ruleEvaluation?.Reason
                 : null;
 
-            if (success && (step.Type == StepType.ApiQuery || step.Type == StepType.ApiSend))
+            if ((step.Type == StepType.ApiQuery || step.Type == StepType.ApiSend) && !success && awaitingData)
+            {
+                logger.LogInformation(
+                    "Resposta HTTP fora de 2xx ficara em nova tentativa. StepId={StepId}, StatusCode={StatusCode}, RetryAfterMinutes={RetryAfterMinutes}",
+                    step.Id,
+                    (int)response.StatusCode,
+                    ruleEvaluation?.RetryIntervalMinutes ?? 3);
+            }
+            else if (success && (step.Type == StepType.ApiQuery || step.Type == StepType.ApiSend))
             {
                 if (awaitingData)
                 {
@@ -781,6 +794,86 @@ internal sealed class IntegrationExecutionService(
             rule.TransportMaxAttempts,
             rule.TransportRetryIntervalMinutes,
             Mode: "transportError");
+    }
+
+    private static ResponseRuleEvaluationDto? EvaluateHttpErrorRule(StepApiConfigDto config, HttpStatusCode statusCode, string? responseText, int attemptCount, DateTime nowUtc)
+    {
+        var rule = BuildRuntimeResponseRule(config);
+        var action = NormalizeRuleBehavior(rule.HttpErrorBehavior, "fail");
+        var statusCodeNumber = (int)statusCode;
+        var reason = $"Resposta HTTP {statusCodeNumber}.";
+        if (!string.IsNullOrWhiteSpace(responseText))
+        {
+            reason = $"{reason} Preview: {Truncate(responseText, 220)}";
+        }
+
+        if (action == "retry")
+        {
+            var maxAttempts = Math.Clamp(rule.HttpErrorMaxAttempts ?? rule.MaxAttempts ?? 20, 1, 100000);
+            if (attemptCount >= maxAttempts)
+            {
+                return new ResponseRuleEvaluationDto(
+                    true,
+                    "failed",
+                    "fail",
+                    $"Limite de {maxAttempts} tentativa(s) atingido apos resposta HTTP {statusCodeNumber}.",
+                    $"$status:{statusCodeNumber}",
+                    "number",
+                    true,
+                    attemptCount,
+                    maxAttempts,
+                    rule.HttpErrorRetryIntervalMinutes ?? rule.RetryIntervalMinutes,
+                    Mode: "httpError",
+                    ActualValue: statusCodeNumber.ToString());
+            }
+
+            var retryMinutes = Math.Clamp(rule.HttpErrorRetryIntervalMinutes ?? rule.RetryIntervalMinutes ?? 3, 1, 10080);
+            return new ResponseRuleEvaluationDto(
+                true,
+                "waiting",
+                "retry",
+                $"Resposta HTTP {statusCodeNumber}. Nova tentativa em {retryMinutes} minuto(s).",
+                $"$status:{statusCodeNumber}",
+                "number",
+                true,
+                attemptCount,
+                maxAttempts,
+                retryMinutes,
+                nowUtc.AddMinutes(retryMinutes),
+                Mode: "httpError",
+                ActualValue: statusCodeNumber.ToString());
+        }
+
+        if (action == "advance")
+        {
+            return new ResponseRuleEvaluationDto(
+                true,
+                "matched",
+                "advance",
+                $"Resposta HTTP {statusCodeNumber}. Etapa configurada para avancar mesmo fora de 2xx.",
+                $"$status:{statusCodeNumber}",
+                "number",
+                true,
+                attemptCount,
+                rule.HttpErrorMaxAttempts,
+                rule.HttpErrorRetryIntervalMinutes,
+                Mode: "httpError",
+                ActualValue: statusCodeNumber.ToString());
+        }
+
+        return new ResponseRuleEvaluationDto(
+            true,
+            "failed",
+            "fail",
+            reason,
+            $"$status:{statusCodeNumber}",
+            "number",
+            true,
+            attemptCount,
+            rule.HttpErrorMaxAttempts,
+            rule.HttpErrorRetryIntervalMinutes,
+            Mode: "httpError",
+            ActualValue: statusCodeNumber.ToString());
     }
 
     private static ResponseRuleDto BuildRuntimeResponseRule(StepApiConfigDto config)

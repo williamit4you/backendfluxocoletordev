@@ -508,6 +508,25 @@ public sealed class FlowManagementService(
         {
             throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' precisa ter limite de tentativas em erro de transporte entre 1 e {MaxResponseRuleAttempts}."] });
         }
+
+        if (responseRule.HttpErrorBehavior == "retry")
+        {
+            if (step.Type != StepType.ApiQuery && step.Type != StepType.ApiSend)
+            {
+                throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' só pode usar nova tentativa em erro HTTP para API de envio ou API de consulta."] });
+            }
+
+            var httpErrorRetryMinutes = responseRule.HttpErrorRetryIntervalMinutes ?? 0;
+            if (httpErrorRetryMinutes < 1 || httpErrorRetryMinutes > 10080)
+            {
+                throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' precisa ter intervalo de nova tentativa em erro HTTP entre 1 e 10080 minutos."] });
+            }
+        }
+
+        if (responseRule.HttpErrorBehavior == "retry" && responseRule.HttpErrorMaxAttempts is < 1 or > MaxResponseRuleAttempts)
+        {
+            throw new AppValidationException(new Dictionary<string, string[]> { ["api"] = [$"A etapa '{step.Name}' precisa ter limite de tentativas em erro HTTP entre 1 e {MaxResponseRuleAttempts}."] });
+        }
     }
 
     private static StepApiConfigDto NormalizeApiConfig(StepApiConfigDto config)
@@ -586,6 +605,13 @@ public sealed class FlowManagementService(
         int? transportMaxAttempts = transportErrorBehavior == "retry"
             ? Math.Clamp(source?.TransportMaxAttempts ?? source?.MaxAttempts ?? 20, 1, MaxResponseRuleAttempts)
             : source?.TransportMaxAttempts;
+        var httpErrorBehavior = NormalizeRuleBehavior(source?.HttpErrorBehavior ?? "fail", "fail");
+        int? httpErrorRetryInterval = httpErrorBehavior == "retry"
+            ? Math.Clamp(source?.HttpErrorRetryIntervalMinutes ?? source?.RetryIntervalMinutes ?? config.EmptyArrayRetryMinutes ?? 3, 1, 10080)
+            : null;
+        int? httpErrorMaxAttempts = httpErrorBehavior == "retry"
+            ? Math.Clamp(source?.HttpErrorMaxAttempts ?? source?.MaxAttempts ?? 20, 1, MaxResponseRuleAttempts)
+            : source?.HttpErrorMaxAttempts;
 
         return new ResponseRuleDto(
             enabled,
@@ -605,7 +631,10 @@ public sealed class FlowManagementService(
             onMismatchBehavior,
             transportErrorBehavior,
             transportRetryInterval,
-            transportMaxAttempts);
+            transportMaxAttempts,
+            httpErrorBehavior,
+            httpErrorRetryInterval,
+            httpErrorMaxAttempts);
     }
 
     private static string NormalizeRuleMode(string? value)
