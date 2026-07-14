@@ -1083,6 +1083,7 @@ public sealed class InstanceManagementService(
 
     public async Task<IReadOnlyList<InstanceDto>> GetAllAsync(Guid? flowId, string? status, string? search, Guid? actorUserId, CancellationToken cancellationToken)
     {
+        var isSuperAdmin = await IsSuperAdminAsync(actorUserId, cancellationToken);
         var query = db.Instances
             .AsNoTracking()
             .Include(x => x.FlowDefinition)
@@ -1118,7 +1119,7 @@ public sealed class InstanceManagementService(
         }
 
         var rows = await query.OrderByDescending(x => x.UpdatedAt).Take(200).ToListAsync(cancellationToken);
-        rows = rows.Where(row => CanViewInstance(row, actorUserId)).ToList();
+        rows = rows.Where(row => CanViewInstance(row, actorUserId, isSuperAdmin)).ToList();
         var result = new List<InstanceDto>(rows.Count);
         foreach (var row in rows)
         {
@@ -1130,6 +1131,7 @@ public sealed class InstanceManagementService(
 
     public async Task<DashboardInstancesResultDto> GetDashboardInstancesAsync(Guid flowId, int page, int pageSize, string? status, string? search, DateTime? startDate, Guid? actorUserId, CancellationToken cancellationToken)
     {
+        var isSuperAdmin = await IsSuperAdminAsync(actorUserId, cancellationToken);
         var selectedFlow = await db.Flows
             .AsNoTracking()
             .SingleOrDefaultAsync(x => x.Id == flowId, cancellationToken)
@@ -1159,7 +1161,9 @@ public sealed class InstanceManagementService(
             query = query.Where(x => x.Code.ToLower().Contains(normalizedSearch));
         }
 
-        var visibleIds = actorUserId.HasValue
+        var visibleIds = isSuperAdmin
+            ? await query.Select(x => x.Id).ToListAsync(cancellationToken)
+            : actorUserId.HasValue
             ? await query
                 .Where(x =>
                     x.StepExecutions.Any(step => step.CompletedByUserId == actorUserId.Value)
@@ -1316,10 +1320,11 @@ public sealed class InstanceManagementService(
 
     public async Task<InstanceDto> GetByIdAsync(Guid id, Guid? actorUserId, CancellationToken cancellationToken)
     {
+        var isSuperAdmin = await IsSuperAdminAsync(actorUserId, cancellationToken);
         var item = await LoadInstance().AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
             ?? throw new AppNotFoundException("Execução não encontrada.");
 
-        if (!CanViewInstance(item, actorUserId))
+        if (!CanViewInstance(item, actorUserId, isSuperAdmin))
         {
             throw new AppForbiddenException();
         }
@@ -1329,10 +1334,11 @@ public sealed class InstanceManagementService(
 
     public async Task<PagedIntegrationAttemptResultDto> GetStepIntegrationAttemptsAsync(Guid id, Guid stepExecutionId, int page, int pageSize, string? statusCodeFilter, Guid? actorUserId, CancellationToken cancellationToken)
     {
+        var isSuperAdmin = await IsSuperAdminAsync(actorUserId, cancellationToken);
         var item = await LoadInstance().AsNoTracking().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
             ?? throw new AppNotFoundException("ExecuÃ§Ã£o nÃ£o encontrada.");
 
-        if (!CanViewInstance(item, actorUserId))
+        if (!CanViewInstance(item, actorUserId, isSuperAdmin))
         {
             throw new AppForbiddenException();
         }
@@ -1616,10 +1622,11 @@ public sealed class InstanceManagementService(
 
     public async Task<InstanceDto> RetryIntegrationAsync(Guid id, Guid? actorUserId, CancellationToken cancellationToken)
     {
+        var isSuperAdmin = await IsSuperAdminAsync(actorUserId, cancellationToken);
         var item = await LoadInstance().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
             ?? throw new AppNotFoundException("Execução não encontrada.");
 
-        if (!CanViewInstance(item, actorUserId))
+        if (!CanViewInstance(item, actorUserId, isSuperAdmin))
         {
             throw new AppForbiddenException();
         }
@@ -1631,10 +1638,11 @@ public sealed class InstanceManagementService(
 
     public async Task<InstanceDto> ReprocessStepAsync(Guid id, Guid stepExecutionId, Guid? actorUserId, CancellationToken cancellationToken)
     {
+        var isSuperAdmin = await IsSuperAdminAsync(actorUserId, cancellationToken);
         var item = await LoadInstance().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
             ?? throw new AppNotFoundException("Execução não encontrada.");
 
-        if (!CanViewInstance(item, actorUserId))
+        if (!CanViewInstance(item, actorUserId, isSuperAdmin))
         {
             throw new AppForbiddenException();
         }
@@ -1695,10 +1703,11 @@ public sealed class InstanceManagementService(
 
     public async Task<InstanceDto> CancelWaitingStepAsync(Guid id, Guid stepExecutionId, Guid? actorUserId, CancellationToken cancellationToken)
     {
+        var isSuperAdmin = await IsSuperAdminAsync(actorUserId, cancellationToken);
         var item = await LoadInstance().SingleOrDefaultAsync(x => x.Id == id, cancellationToken)
             ?? throw new AppNotFoundException("Execução não encontrada.");
 
-        if (!CanViewInstance(item, actorUserId))
+        if (!CanViewInstance(item, actorUserId, isSuperAdmin))
         {
             throw new AppForbiddenException();
         }
@@ -1834,8 +1843,23 @@ public sealed class InstanceManagementService(
         return HasFlowAccess(flow, actorUserId) || (flow.AssignedUsers.Count == 0 && !step.AssignedUserId.HasValue);
     }
 
-    private static bool CanViewInstance(FlowInstance item, Guid? actorUserId)
+    private async Task<bool> IsSuperAdminAsync(Guid? actorUserId, CancellationToken cancellationToken)
     {
+        return actorUserId.HasValue
+            && await db.Users
+                .AsNoTracking()
+                .AnyAsync(
+                    user => user.Id == actorUserId.Value && user.Active && user.Role == UserRole.SuperAdmin,
+                    cancellationToken);
+    }
+
+    private static bool CanViewInstance(FlowInstance item, Guid? actorUserId, bool isSuperAdmin = false)
+    {
+        if (isSuperAdmin)
+        {
+            return true;
+        }
+
         var currentStep = item.StepExecutions.SingleOrDefault(step => step.Status == StepStatus.InProgress);
         if (currentStep is null)
         {
