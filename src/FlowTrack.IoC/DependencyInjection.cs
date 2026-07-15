@@ -1265,8 +1265,24 @@ internal sealed class IntegrationExecutionService(
     private static bool TryResolveJsonPath(JsonElement root, string path, out JsonElement value)
     {
         value = root;
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return true;
+        }
 
-        foreach (var segment in path.Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        var normalizedPath = path.Trim();
+        if (normalizedPath == "$")
+        {
+            return true;
+        }
+
+        normalizedPath = normalizedPath.TrimStart('$').TrimStart('.');
+        if (string.IsNullOrWhiteSpace(normalizedPath))
+        {
+            return true;
+        }
+
+        foreach (var segment in normalizedPath.Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
             if (value.ValueKind == JsonValueKind.Object && TryGetPropertyCaseInsensitive(value, segment, out var property))
             {
