@@ -22,6 +22,7 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Npgsql;
 
 namespace FlowTrack.IoC;
@@ -39,6 +40,7 @@ public static class DependencyInjection
         services.AddScoped<IPasswordService, PasswordService>();
         services.AddScoped<ITokenService, TokenService>();
         services.AddScoped<IPdfExtractionService, PdfExtractionService>();
+        services.Configure<ConsultaDanfeOptions>(config.GetSection("ConsultaDanfe"));
         services.AddScoped<IAuthService, AuthService>();
         services.AddScoped<ITokenProtectionService, TokenProtectionService>();
         services.AddScoped<IAuditService, AuditService>();
@@ -54,6 +56,11 @@ public static class DependencyInjection
         services.AddHttpClient<IIntegrationExecutionService, IntegrationExecutionService>(client =>
         {
             client.Timeout = TimeSpan.FromSeconds(30);
+        });
+        services.AddHttpClient<IConsultaDanfeService, ConsultaDanfeService>((sp, client) =>
+        {
+            var options = sp.GetRequiredService<IOptions<ConsultaDanfeOptions>>().Value;
+            client.Timeout = TimeSpan.FromSeconds(Math.Clamp(options.TimeoutSeconds, 5, 180));
         });
         services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer(o =>
         {

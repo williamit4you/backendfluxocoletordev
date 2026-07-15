@@ -11,7 +11,8 @@ public record UserDto(Guid Id, string Name, string Email, string Role, bool Acti
 public record CreateUserRequest(string Name, string Email, string Password, string Role);
 public record UpdateUserRequest(string Name, string Role, bool Active, string? Password);
 public record FieldOptionDto(Guid? Id, string Label, string Value, int Order, string? Key = null, FieldType? Type = null, string? Mask = null, bool? Required = null);
-public record FieldDto(Guid? Id, string Key, string Label, FieldType Type, string? Mask, bool Required, int Order, IReadOnlyList<FieldOptionDto> Options);
+public record FieldAutomationConfigDto(bool EnableNfeLookup = false, string? NfeLookupRole = null);
+public record FieldDto(Guid? Id, string Key, string Label, FieldType Type, string? Mask, bool Required, int Order, IReadOnlyList<FieldOptionDto> Options, FieldAutomationConfigDto? Automation = null);
 public record FlowTokenDto(Guid? Id, string Name, string? Value, TokenType Type, string? HeaderName, bool Active);
 public record MinioBucketDto(Guid? Id, string Name, string BucketName, string? Description, bool Active, bool IsDefault);
 public record MinioConfigurationDto(Guid? Id, string Endpoint, string AccessKey, string SecretKey, string PublicUrl, bool Active, IReadOnlyList<MinioBucketDto> Buckets);
@@ -34,10 +35,13 @@ public record IntegrationExecutionResult(bool Success, int? StatusCode, int Dura
 public record UploadedFileDto(string Id, string FieldKey, string FileName, string ContentType, long Size, string Url, bool IsPhoto, DateTime UploadedAt);
 public record CreateInstanceRequest(Guid FlowDefinitionId, string? Code, Dictionary<string, JsonElement> Data);
 public record AdvanceStepRequest(string? Notes, Dictionary<string, JsonElement>? Data = null);
-public record ExecutionFieldDto(Guid? Id, string Key, string Label, FieldType Type, string? Mask, bool Required, int Order, IReadOnlyList<FieldOptionDto> Options, string? Value);
+public record ExecutionFieldDto(Guid? Id, string Key, string Label, FieldType Type, string? Mask, bool Required, int Order, IReadOnlyList<FieldOptionDto> Options, string? Value, FieldAutomationConfigDto? Automation = null);
 public record StepProgressDto(Guid Id, Guid FlowStepId, string Name, int Order, StepType Type, StepStatus Status, DateTime? StartedAt, DateTime? CompletedAt, Guid? CompletedByUserId, string? CompletedByName, string? Notes, bool IsAutomatic, Dictionary<string, JsonElement> Data, IReadOnlyList<ExecutionFieldDto> Fields, IReadOnlyList<IntegrationAttemptDto> IntegrationAttempts, int IntegrationAttemptsTotalCount, IReadOnlyList<IntegrationAttemptStatusFilterDto> IntegrationAttemptStatusFilters);
 public record InstanceDto(Guid Id, Guid FlowDefinitionId, Guid FlowKey, string FlowName, int FlowVersionNumber, string FlowLifecycleStatus, bool IsCurrentFlowVersion, string Code, InstanceStatus Status, int CurrentStepOrder, DateTime CreatedAt, DateTime UpdatedAt, Dictionary<string, JsonElement> Data, Guid? CurrentStepExecutionId, IReadOnlyList<StepProgressDto> Steps);
 public record PdfExtractionDto(Dictionary<string, string> Fields, IReadOnlyList<string> Warnings);
+public record ConsultaDanfeApiRequest(string ChaveAcesso, string Format = "json");
+public record ConsultaDanfeApiPayloadDto(string Status, string? Chave = null, string? Tipo = null, string? PdfBase64 = null, string? XmlBase64 = null, string? Xml = null, bool? Recovery = null, string? Info = null);
+public record ConsultaDanfeApiResult(bool Success, int StatusCode, string? ContentType, string? ErrorCode, string? Message, string? RawBody = null, ConsultaDanfeApiPayloadDto? Payload = null, byte[]? PdfBytes = null);
 public record PagedResultDto<T>(IReadOnlyList<T> Items, int TotalCount, int Page, int PageSize);
 public record PagedIntegrationAttemptResultDto(IReadOnlyList<IntegrationAttemptDto> Items, int TotalCount, int Page, int PageSize, IReadOnlyList<IntegrationAttemptStatusFilterDto> AvailableStatusCodes);
 public record DashboardInstancesResultDto(IReadOnlyList<InstanceDto> Items, int TotalCount, int Page, int PageSize, int InProgressCount, int CompletedCount, int CancelledCount);
@@ -67,6 +71,10 @@ public interface IAppDbContext
 public interface ITokenService { string Create(AppUser user); }
 public interface IPasswordService { string Hash(AppUser user, string password); bool Verify(AppUser user, string hash, string password); }
 public interface IPdfExtractionService { Task<PdfExtractionDto> ExtractAsync(Stream stream, CancellationToken cancellationToken); }
+public interface IConsultaDanfeService
+{
+    Task<ConsultaDanfeApiResult> ConsultarNfeAsync(ConsultaDanfeApiRequest request, CancellationToken cancellationToken);
+}
 public interface IAuthService
 {
     Task<LoginResponse> LoginAsync(LoginRequest request, CancellationToken cancellationToken);

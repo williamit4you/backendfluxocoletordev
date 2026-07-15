@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Globalization;
+using System.Xml.Linq;
 using FlowTrack.Domain;
 using Microsoft.EntityFrameworkCore;
 
@@ -416,6 +417,7 @@ public sealed class FlowManagementService(
                         Mask = string.IsNullOrWhiteSpace(field.Mask) ? null : field.Mask.Trim(),
                         Required = field.Required,
                         Order = fieldIndex + 1,
+                        ConfigurationJson = SerializeFieldAutomationConfig(field.Automation, field.Type),
                         Options = NormalizeFieldOptions(field).ToList()
                     })
                     .ToList()
@@ -780,6 +782,7 @@ public sealed class FlowManagementService(
                             Mask = field.Mask,
                             Required = field.Required,
                             Order = field.Order,
+                            ConfigurationJson = field.ConfigurationJson,
                             Options = field.Options
                                 .OrderBy(x => x.Order)
                                 .Select(option => new StepFieldOption
@@ -863,7 +866,36 @@ public sealed class FlowManagementService(
             field.Options
                 .OrderBy(option => option.Order)
                 .Select(option => new FieldOptionDto(option.Id, option.Label, option.Value, option.Order, option.Key, option.Type, option.Mask, option.Required))
-                .ToList());
+                .ToList(),
+            ParseFieldAutomationConfig(field.ConfigurationJson, field.Type));
+    }
+
+    private static FieldAutomationConfigDto? ParseFieldAutomationConfig(string? json, FieldType fieldType)
+    {
+        if (string.IsNullOrWhiteSpace(json) || fieldType != FieldType.Text)
+        {
+            return null;
+        }
+
+        var config = JsonSerializer.Deserialize<FieldAutomationConfigDto>(json);
+        return NormalizeFieldAutomationConfig(config, fieldType);
+    }
+
+    private static string? SerializeFieldAutomationConfig(FieldAutomationConfigDto? config, FieldType fieldType)
+    {
+        var normalized = NormalizeFieldAutomationConfig(config, fieldType);
+        return normalized is null ? null : JsonSerializer.Serialize(normalized);
+    }
+
+    private static FieldAutomationConfigDto? NormalizeFieldAutomationConfig(FieldAutomationConfigDto? config, FieldType fieldType)
+    {
+        if (config is null || fieldType != FieldType.Text || !config.EnableNfeLookup)
+        {
+            return null;
+        }
+
+        var role = string.IsNullOrWhiteSpace(config.NfeLookupRole) ? "accessKey" : config.NfeLookupRole.Trim();
+        return new FieldAutomationConfigDto(true, role);
     }
 
     private static IEnumerable<StepFieldOption> NormalizeFieldOptions(FieldDto field)
@@ -1142,7 +1174,8 @@ public sealed class InstanceManagementService(
     IInstanceAutomationService automation,
     IIntegrationExecutionService integrations,
     IFileStorageService fileStorage,
-    IPdfExtractionService pdfExtraction) : IInstanceManagementService
+    IPdfExtractionService pdfExtraction,
+    IConsultaDanfeService consultaDanfe) : IInstanceManagementService
 {
     private const int DefaultIntegrationAttemptsPageSize = 10;
 
@@ -1563,6 +1596,7 @@ public sealed class InstanceManagementService(
         }
 
         var mergedData = MergeStepData(item, current, data);
+        mergedData = await ApplyNfeLookupAsync(current, mergedData, cancellationToken);
         ValidateRequiredFields(current, mergedData);
 
         current.DataJson = JsonSerializer.Serialize(mergedData);
@@ -1676,6 +1710,7 @@ public sealed class InstanceManagementService(
         }
 
         var mergedData = MergeStepData(item, current, request.Data);
+        mergedData = await ApplyNfeLookupAsync(current, mergedData, cancellationToken);
         ValidateRequiredFields(current, mergedData);
         current.DataJson = JsonSerializer.Serialize(mergedData);
         item.DataJson = MergeInstanceData(item.DataJson, mergedData);
@@ -1992,6 +2027,58 @@ public sealed class InstanceManagementService(
         return string.Equals(contentType, "application/pdf", StringComparison.OrdinalIgnoreCase);
     }
 
+    private async Task<Dictionary<string, JsonElement>> ApplyNfeLookupAsync(
+        StepExecution current,
+        Dictionary<string, JsonElement> mergedData,
+        CancellationToken cancellationToken)
+    {
+        var lookupField = current.FlowStep.Fields.FirstOrDefault(IsNfeLookupAccessKeyField);
+        if (lookupField is null)
+        {
+            return mergedData;
+        }
+
+        if (!mergedData.TryGetValue(lookupField.Key, out var accessKeyElement))
+        {
+            return mergedData;
+        }
+
+        var accessKey = NormalizeNfeAccessKey(accessKeyElement.ToString());
+        if (string.IsNullOrWhiteSpace(accessKey))
+        {
+            return mergedData;
+        }
+
+        var result = await consultaDanfe.ConsultarNfeAsync(new ConsultaDanfeApiRequest(accessKey), cancellationToken);
+        if (!result.Success)
+        {
+            var message = string.IsNullOrWhiteSpace(result.Message)
+                ? "Nao foi possivel consultar a NF-e informada."
+                : result.Message;
+            throw new AppConflictException($"Falha na consulta automatica da NF-e: {message}");
+        }
+
+        var xmlContent = TryGetNfeXml(result);
+        if (string.IsNullOrWhiteSpace(xmlContent))
+        {
+            throw new AppConflictException("A consulta automatica da NF-e nao retornou XML para preenchimento dos campos.");
+        }
+
+        var extracted = ExtractNfeData(xmlContent, result.Payload?.Chave ?? accessKey);
+
+        foreach (var entry in MapNfeFieldsToStepFields(current.FlowStep.Fields, extracted.Fields))
+        {
+            mergedData[entry.Key] = JsonSerializer.SerializeToElement(entry.Value);
+        }
+
+        foreach (var entry in MapNfeStructuredLists(current.FlowStep.Fields, extracted.Items))
+        {
+            mergedData[entry.Key] = JsonSerializer.SerializeToElement(entry.Value);
+        }
+
+        return mergedData;
+    }
+
     private static Dictionary<string, string> MapPdfFieldsToStepFields(IEnumerable<StepField> fields, Dictionary<string, string> extractedFields)
     {
         var extractedEntries = extractedFields
@@ -2019,6 +2106,86 @@ public sealed class InstanceManagementService(
         return mapped;
     }
 
+    private static Dictionary<string, string> MapNfeFieldsToStepFields(IEnumerable<StepField> fields, Dictionary<string, string> extractedFields)
+    {
+        var extractedEntries = extractedFields
+            .Where(entry => !string.IsNullOrWhiteSpace(entry.Value))
+            .Select(entry => new ReaderExtractedEntry(entry.Key, entry.Value, ExpandNfeAliases(entry.Key)))
+            .ToList();
+
+        var mapped = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var field in fields)
+        {
+            if (field.Type is FieldType.Document or FieldType.Attachment or FieldType.Photo)
+            {
+                continue;
+            }
+
+            if (IsStructuredListField(field))
+            {
+                continue;
+            }
+
+            var candidates = BuildNfeCandidates(field);
+            var match = extractedEntries.FirstOrDefault(entry => entry.Aliases.Any(alias => candidates.Contains(alias)));
+            if (match is null)
+            {
+                continue;
+            }
+
+            mapped[field.Key] = CoerceReaderValue(field, match.Value);
+        }
+
+        return mapped;
+    }
+
+    private static Dictionary<string, List<Dictionary<string, object?>>> MapNfeStructuredLists(IEnumerable<StepField> fields, IReadOnlyList<Dictionary<string, string>> items)
+    {
+        if (items.Count == 0)
+        {
+            return [];
+        }
+
+        var mapped = new Dictionary<string, List<Dictionary<string, object?>>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var field in fields.Where(IsStructuredListField))
+        {
+            var candidates = BuildNfeCandidates(field);
+            if (!ExpandNfeAliases("itens").Any(alias => candidates.Contains(alias)))
+            {
+                continue;
+            }
+
+            var rows = new List<Dictionary<string, object?>>();
+            foreach (var item in items)
+            {
+                var row = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                foreach (var option in field.Options.Where(option => !string.IsNullOrWhiteSpace(option.Key)))
+                {
+                    var optionCandidates = BuildNfeCandidates(option);
+                    var match = item.FirstOrDefault(entry => ExpandNfeAliases(entry.Key).Any(alias => optionCandidates.Contains(alias)));
+                    if (string.IsNullOrWhiteSpace(match.Value))
+                    {
+                        continue;
+                    }
+
+                    row[option.Key!.Trim()] = CoerceNfeOptionValue(option, match.Value);
+                }
+
+                if (row.Count > 0)
+                {
+                    rows.Add(row);
+                }
+            }
+
+            if (rows.Count > 0)
+            {
+                mapped[field.Key] = rows;
+            }
+        }
+
+        return mapped;
+    }
+
     private static HashSet<string> BuildReaderCandidates(StepField field)
     {
         var candidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -2034,12 +2201,66 @@ public sealed class InstanceManagementService(
         return candidates;
     }
 
+    private static HashSet<string> BuildNfeCandidates(StepField field)
+    {
+        var candidates = BuildReaderCandidates(field);
+        foreach (var source in new[] { field.Key, field.Label })
+        {
+            foreach (var alias in ExpandNfeAliases(source))
+            {
+                candidates.Add(alias);
+            }
+        }
+
+        return candidates;
+    }
+
+    private static HashSet<string> BuildNfeCandidates(StepFieldOption option)
+    {
+        var candidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var source in new[] { option.Key, option.Label, option.Value })
+        {
+            if (string.IsNullOrWhiteSpace(source))
+            {
+                continue;
+            }
+
+            foreach (var alias in ExpandNfeAliases(source))
+            {
+                candidates.Add(alias);
+            }
+        }
+
+        return candidates;
+    }
+
     private static HashSet<string> ExpandReaderAliases(string value)
     {
         var normalized = NormalizeReaderToken(value);
         var aliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { normalized };
 
         foreach (var group in ReaderAliasGroups)
+        {
+            if (!group.Contains(normalized, StringComparer.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            foreach (var alias in group)
+            {
+                aliases.Add(alias);
+            }
+        }
+
+        return aliases;
+    }
+
+    private static HashSet<string> ExpandNfeAliases(string value)
+    {
+        var aliases = ExpandReaderAliases(value);
+        var normalized = NormalizeReaderToken(value);
+
+        foreach (var group in NfeAliasGroups)
         {
             if (!group.Contains(normalized, StringComparer.OrdinalIgnoreCase))
             {
@@ -2101,6 +2322,31 @@ public sealed class InstanceManagementService(
         return ApplyReaderMask(field.Mask, text);
     }
 
+    private static object? CoerceNfeOptionValue(StepFieldOption option, string value)
+    {
+        var text = value.Trim();
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return null;
+        }
+
+        if (option.Type == FieldType.Number)
+        {
+            var normalized = ParseReaderNumber(text);
+            if (decimal.TryParse(normalized, NumberStyles.Any, CultureInfo.InvariantCulture, out var decimalValue))
+            {
+                return decimalValue;
+            }
+        }
+
+        if (option.Type == FieldType.Date)
+        {
+            return ParseReaderDate(text);
+        }
+
+        return ApplyReaderMask(option.Mask, text);
+    }
+
     private static string ParseReaderDate(string value)
     {
         var brDate = Regex.Match(value, @"^(\d{2})/(\d{2})/(\d{4})$");
@@ -2159,7 +2405,242 @@ public sealed class InstanceManagementService(
         return string.Concat(parts.Where(part => !string.IsNullOrWhiteSpace(part)));
     }
 
+    private static bool IsStructuredListField(StepField field)
+    {
+        return field.Type == FieldType.Select && field.Options.Any(option => !string.IsNullOrWhiteSpace(option.Key) && option.Type.HasValue);
+    }
+
+    private static bool IsNfeLookupAccessKeyField(StepField field)
+    {
+        if (field.Type != FieldType.Text || string.IsNullOrWhiteSpace(field.ConfigurationJson))
+        {
+            return false;
+        }
+
+        var config = JsonSerializer.Deserialize<FieldAutomationConfigDto>(field.ConfigurationJson);
+        return config?.EnableNfeLookup == true
+            && string.Equals(config.NfeLookupRole ?? "accessKey", "accessKey", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string NormalizeNfeAccessKey(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        return new string(value.Where(char.IsLetterOrDigit).ToArray()).ToUpperInvariant();
+    }
+
+    private static string? TryGetNfeXml(ConsultaDanfeApiResult result)
+    {
+        if (!string.IsNullOrWhiteSpace(result.Payload?.Xml))
+        {
+            return result.Payload.Xml;
+        }
+
+        if (string.IsNullOrWhiteSpace(result.Payload?.XmlBase64))
+        {
+            return null;
+        }
+
+        try
+        {
+            var bytes = Convert.FromBase64String(result.Payload.XmlBase64);
+            return Encoding.UTF8.GetString(bytes);
+        }
+        catch (FormatException)
+        {
+            return null;
+        }
+    }
+
+    private static NfeExtractionResult ExtractNfeData(string xmlContent, string? fallbackAccessKey)
+    {
+        try
+        {
+            var document = XDocument.Parse(xmlContent);
+            var infNfe = Descendants(document, "infNFe").FirstOrDefault();
+            var ide = infNfe is null ? null : Element(infNfe, "ide");
+            var emit = infNfe is null ? null : Element(infNfe, "emit");
+            var dest = infNfe is null ? null : Element(infNfe, "dest");
+            var total = infNfe is null ? null : Descendants(infNfe, "ICMSTot").FirstOrDefault();
+            var transp = infNfe is null ? null : Element(infNfe, "transp");
+            var veicTransp = transp is null ? null : Element(transp, "veicTransp");
+            var prot = Descendants(document, "infProt").FirstOrDefault();
+
+            var accessKey = Attribute(infNfe, "Id");
+            if (!string.IsNullOrWhiteSpace(accessKey) && accessKey.StartsWith("NFe", StringComparison.OrdinalIgnoreCase))
+            {
+                accessKey = accessKey[3..];
+            }
+
+            var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["nfe_chave_acesso"] = string.IsNullOrWhiteSpace(accessKey) ? fallbackAccessKey ?? string.Empty : accessKey,
+                ["nfe_numero"] = Value(ide, "nNF"),
+                ["nfe_serie"] = Value(ide, "serie"),
+                ["nfe_natureza_operacao"] = Value(ide, "natOp"),
+                ["nfe_data_emissao"] = NormalizeXmlDate(Value(ide, "dhEmi"), Value(ide, "dEmi")),
+                ["nfe_data_saida_entrada"] = NormalizeXmlDate(Value(ide, "dhSaiEnt"), Value(ide, "dSaiEnt")),
+                ["nfe_hora_saida_entrada"] = NormalizeXmlTime(Value(ide, "dhSaiEnt")),
+                ["nfe_protocolo_autorizacao"] = Value(prot, "nProt"),
+                ["nfe_situacao"] = FirstNotEmpty(Value(prot, "xMotivo"), Value(prot, "cStat")),
+                ["emitente_cnpj"] = FirstNotEmpty(Value(emit, "CNPJ"), Value(emit, "CPF")),
+                ["emitente_razao_social"] = Value(emit, "xNome"),
+                ["emitente_inscricao_estadual"] = Value(emit, "IE"),
+                ["emitente_endereco"] = JoinAddress(Element(emit, "enderEmit")),
+                ["emitente_bairro"] = Value(Element(emit, "enderEmit"), "xBairro"),
+                ["emitente_cep"] = Value(Element(emit, "enderEmit"), "CEP"),
+                ["emitente_municipio"] = Value(Element(emit, "enderEmit"), "xMun"),
+                ["emitente_uf"] = Value(Element(emit, "enderEmit"), "UF"),
+                ["emitente_telefone"] = Value(Element(emit, "enderEmit"), "fone"),
+                ["destinatario_cnpj_cpf"] = FirstNotEmpty(Value(dest, "CNPJ"), Value(dest, "CPF")),
+                ["destinatario_razao_social"] = Value(dest, "xNome"),
+                ["destinatario_inscricao_estadual"] = Value(dest, "IE"),
+                ["destinatario_endereco"] = JoinAddress(Element(dest, "enderDest")),
+                ["destinatario_bairro"] = Value(Element(dest, "enderDest"), "xBairro"),
+                ["destinatario_cep"] = Value(Element(dest, "enderDest"), "CEP"),
+                ["destinatario_municipio"] = Value(Element(dest, "enderDest"), "xMun"),
+                ["destinatario_uf"] = Value(Element(dest, "enderDest"), "UF"),
+                ["destinatario_telefone"] = Value(Element(dest, "enderDest"), "fone"),
+                ["total_base_icms"] = NormalizeXmlNumber(Value(total, "vBC")),
+                ["total_valor_icms"] = NormalizeXmlNumber(Value(total, "vICMS")),
+                ["total_base_icms_st"] = NormalizeXmlNumber(Value(total, "vBCST")),
+                ["total_valor_icms_st"] = NormalizeXmlNumber(Value(total, "vST")),
+                ["total_produtos"] = NormalizeXmlNumber(Value(total, "vProd")),
+                ["total_frete"] = NormalizeXmlNumber(Value(total, "vFrete")),
+                ["total_seguro"] = NormalizeXmlNumber(Value(total, "vSeg")),
+                ["total_desconto"] = NormalizeXmlNumber(Value(total, "vDesc")),
+                ["total_outras_despesas"] = NormalizeXmlNumber(Value(total, "vOutro")),
+                ["total_ipi"] = NormalizeXmlNumber(Value(total, "vIPI")),
+                ["total_nota"] = NormalizeXmlNumber(Value(total, "vNF")),
+                ["placa"] = Value(veicTransp, "placa")
+            };
+
+            var items = Descendants(infNfe, "det")
+                .Select(det =>
+                {
+                    var prod = Element(det, "prod");
+                    var ipi = Descendants(det, "IPITrib").FirstOrDefault() ?? Descendants(det, "IPINT").FirstOrDefault();
+                    var icms = Descendants(det, "ICMS").Elements().FirstOrDefault();
+
+                    return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["codigo_produto"] = Value(prod, "cProd"),
+                        ["descricao"] = Value(prod, "xProd"),
+                        ["ncm"] = Value(prod, "NCM"),
+                        ["cst"] = FirstNotEmpty(Value(icms, "CST"), Value(icms, "CSOSN")),
+                        ["cfop"] = Value(prod, "CFOP"),
+                        ["unidade"] = FirstNotEmpty(Value(prod, "uCom"), Value(prod, "uTrib")),
+                        ["quantidade"] = NormalizeXmlNumber(FirstNotEmpty(Value(prod, "qCom"), Value(prod, "qTrib"))),
+                        ["valor_unitario"] = NormalizeXmlNumber(FirstNotEmpty(Value(prod, "vUnCom"), Value(prod, "vUnTrib"))),
+                        ["valor_total_item"] = NormalizeXmlNumber(Value(prod, "vProd")),
+                        ["base_icms"] = NormalizeXmlNumber(Value(icms, "vBC")),
+                        ["valor_icms"] = NormalizeXmlNumber(Value(icms, "vICMS")),
+                        ["valor_ipi"] = NormalizeXmlNumber(Value(ipi, "vIPI")),
+                        ["aliquota_icms"] = NormalizeXmlNumber(Value(icms, "pICMS")),
+                        ["aliquota_ipi"] = NormalizeXmlNumber(Value(ipi, "pIPI"))
+                    };
+                })
+                .Where(row => row.Values.Any(value => !string.IsNullOrWhiteSpace(value)))
+                .ToList();
+
+            return new NfeExtractionResult(fields, items);
+        }
+        catch (Exception exception) when (exception is System.Xml.XmlException or InvalidOperationException)
+        {
+            throw new AppConflictException("A resposta da consulta NF-e nao retornou um XML valido para preenchimento automatico.", exception);
+        }
+    }
+
+    private static IEnumerable<XElement> Descendants(XContainer? parent, string localName)
+    {
+        return parent?.Descendants().Where(element => string.Equals(element.Name.LocalName, localName, StringComparison.OrdinalIgnoreCase))
+            ?? Enumerable.Empty<XElement>();
+    }
+
+    private static XElement? Element(XContainer? parent, string localName)
+    {
+        return parent?.Elements().FirstOrDefault(element => string.Equals(element.Name.LocalName, localName, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string Value(XContainer? parent, string localName)
+    {
+        return Element(parent, localName)?.Value?.Trim() ?? string.Empty;
+    }
+
+    private static string Attribute(XElement? element, string attributeName)
+    {
+        return element?.Attributes().FirstOrDefault(attribute => string.Equals(attribute.Name.LocalName, attributeName, StringComparison.OrdinalIgnoreCase))?.Value?.Trim()
+            ?? string.Empty;
+    }
+
+    private static string JoinAddress(XContainer? address)
+    {
+        var street = Value(address, "xLgr");
+        var number = Value(address, "nro");
+        var complement = Value(address, "xCpl");
+        return string.Join(", ", new[] { street, number, complement }.Where(value => !string.IsNullOrWhiteSpace(value)));
+    }
+
+    private static string FirstNotEmpty(params string[] values)
+    {
+        return values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)) ?? string.Empty;
+    }
+
+    private static string NormalizeXmlDate(params string[] values)
+    {
+        foreach (var value in values)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                continue;
+            }
+
+            if (DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var offsetDateTime))
+            {
+                return offsetDateTime.ToString("yyyy-MM-dd");
+            }
+
+            if (DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dateTime))
+            {
+                return dateTime.ToString("yyyy-MM-dd");
+            }
+        }
+
+        return string.Empty;
+    }
+
+    private static string NormalizeXmlTime(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        if (DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var offsetDateTime))
+        {
+            return offsetDateTime.ToString("HH:mm:ss");
+        }
+
+        return string.Empty;
+    }
+
+    private static string NormalizeXmlNumber(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        return decimal.TryParse(value, NumberStyles.Any, CultureInfo.InvariantCulture, out var number)
+            ? number.ToString(CultureInfo.InvariantCulture)
+            : ParseReaderNumber(value);
+    }
+
     private sealed record ReaderExtractedEntry(string Key, string Value, HashSet<string> Aliases);
+    private sealed record NfeExtractionResult(Dictionary<string, string> Fields, IReadOnlyList<Dictionary<string, string>> Items);
 
     private static readonly string[][] ReaderAliasGroups =
     [
@@ -2179,6 +2660,64 @@ public sealed class InstanceManagementService(
         ["valortotal", "valortotaldanota", "totalnota", "valornota"],
         ["valortotaldosprodutos", "totalprodutos", "valorprodutos"],
         ["itens", "produtos"]
+    ];
+
+    private static readonly string[][] NfeAliasGroups =
+    [
+        ["nfechaveacesso", "chaveacesso", "chave", "chavenfe", "chavedeacesso", "accesskey"],
+        ["nfenumero", "numeronfe", "numerodanota", "numero"],
+        ["nfeserie", "serie"],
+        ["nfenaturezaoperacao", "naturezaoperacao", "natop"],
+        ["nfedataemissao", "dataemissao", "emissao"],
+        ["nfedatasaidaentrada", "datasaidaentrada", "saidaentrada"],
+        ["nfehorasaidaentrada", "horasaidaentrada", "horasaida"],
+        ["nfeprotocoloautorizacao", "protocoloautorizacao", "protocolo"],
+        ["nfesituacao", "situacao"],
+        ["emitentecnpj", "cnpjemitente", "documentoemitente"],
+        ["emitenterazaosocial", "razaosocialemitente", "emitente", "nomeemitente"],
+        ["emitenteinscricaoestadual", "ieemitente", "inscricaoestadualemitente"],
+        ["emitenteendereco", "enderecoemitente"],
+        ["emitentebairro", "bairroemitente"],
+        ["emitentecep", "cepemitente"],
+        ["emitentemunicipio", "municipioemitente", "cidadeemitente"],
+        ["emitenteuf", "ufemitente"],
+        ["emitentetelefone", "telefoneemitente", "foneemitente"],
+        ["destinatariocnpjcpf", "destinatariocnpj", "destinatariocpf", "documentododestinatario"],
+        ["destinatariorazaosocial", "razaosocialdestinatario", "destinatario", "nomedodestinatario"],
+        ["destinatarioinscricaoestadual", "iedestinatario", "inscricaoestadualdestinatario"],
+        ["destinatarioendereco", "enderecodestinatario"],
+        ["destinatariobairro", "bairrodestinatario"],
+        ["destinatariocep", "cepdestinatario"],
+        ["destinatariomunicipio", "municipiodestinatario", "cidadedestinatario"],
+        ["destinatariouf", "ufdestinatario"],
+        ["destinatariotelefone", "telefonedestinatario", "fonedestinatario"],
+        ["totalbaseicms", "baseicms"],
+        ["totalvaloricms", "valoricms"],
+        ["totalbaseicmsst", "baseicmsst"],
+        ["totalvaloricmsst", "valoricmsst"],
+        ["totalprodutos", "valortotaldosprodutos", "valorprodutos"],
+        ["totalfrete", "frete"],
+        ["totalseguro", "seguro"],
+        ["totaldesconto", "desconto"],
+        ["totaloutrasdespesas", "outrasdespesas", "despesasacessorias"],
+        ["totalipi", "valoripi"],
+        ["totalnota", "valortotal", "valornota"],
+        ["placa", "placaveiculo"],
+        ["itens", "produtos"],
+        ["codigoproduto", "cprod"],
+        ["descricao", "xprod", "produto"],
+        ["ncm"],
+        ["cst", "csosn"],
+        ["cfop"],
+        ["unidade", "ucom", "utrib"],
+        ["quantidade", "qcom", "qtrib"],
+        ["valorunitario", "vuncom", "vuntrib"],
+        ["valortotalitem", "vprod"],
+        ["baseicms"],
+        ["valoricms"],
+        ["valoripi", "vipi"],
+        ["aliquotaicms", "picms"],
+        ["aliquotaipi", "pipi"]
     ];
 
     private static void ValidateRequiredFields(StepExecution current, Dictionary<string, JsonElement> data)
@@ -2465,7 +3004,8 @@ public sealed class InstanceManagementService(
                                 f.Options.OrderBy(o => o.Order).Select(o => new FieldOptionDto(o.Id, o.Label, o.Value, o.Order, o.Key, o.Type, o.Mask, o.Required)).ToList(),
                                 f.Type is FieldType.Attachment or FieldType.Photo or FieldType.Document
                                     ? string.Join(", ", (storedFileDtos.TryGetValue(x.Id, out var uploadFiles) ? uploadFiles.Where(file => string.Equals(file.FieldKey, f.Key, StringComparison.OrdinalIgnoreCase)).Select(file => file.FileName) : Enumerable.Empty<string>()).ToArray())
-                                    : enrichedData.TryGetValue(f.Key, out var fieldValue) ? fieldValue.ToString() : null))
+                                    : enrichedData.TryGetValue(f.Key, out var fieldValue) ? fieldValue.ToString() : null,
+                                ParseFieldAutomationConfig(f.ConfigurationJson, f.Type)))
                             .ToList(),
                         integrationAttemptsByStep.TryGetValue(x.FlowStepId, out var attemptsPage) ? attemptsPage.Attempts : [],
                         integrationAttemptsByStep.TryGetValue(x.FlowStepId, out var attemptsMeta) ? attemptsMeta.TotalCount : 0,
@@ -2556,6 +3096,23 @@ public sealed class InstanceManagementService(
         }
 
         return result;
+    }
+
+    private static FieldAutomationConfigDto? ParseFieldAutomationConfig(string? json, FieldType fieldType)
+    {
+        if (string.IsNullOrWhiteSpace(json) || fieldType != FieldType.Text)
+        {
+            return null;
+        }
+
+        var config = JsonSerializer.Deserialize<FieldAutomationConfigDto>(json);
+        if (config is null || !config.EnableNfeLookup)
+        {
+            return null;
+        }
+
+        var role = string.IsNullOrWhiteSpace(config.NfeLookupRole) ? "accessKey" : config.NfeLookupRole.Trim();
+        return new FieldAutomationConfigDto(true, role);
     }
 }
 

@@ -55,7 +55,8 @@ internal static class FlowDefinitionMapper
                             field.Options
                                 .OrderBy(option => option.Order)
                                 .Select(option => new FieldOptionDto(option.Id, option.Label, option.Value, option.Order, option.Key, option.Type, option.Mask, option.Required))
-                                .ToList()))
+                                .ToList(),
+                            ParseFieldAutomationConfig(field.ConfigurationJson, field.Type)))
                         .ToList(),
                     ParseApiConfig(step.ConfigurationJson)))
                 .ToList());
@@ -117,6 +118,7 @@ internal static class FlowDefinitionMapper
                         Mask = string.IsNullOrWhiteSpace(field.Mask) ? null : field.Mask.Trim(),
                         Required = field.Required,
                         Order = fieldIndex + 1,
+                        ConfigurationJson = SerializeFieldAutomationConfig(field.Automation, field.Type),
                         Options = field.Options
                             .Where(x => !string.IsNullOrWhiteSpace(x.Label) || !string.IsNullOrWhiteSpace(x.Value) || !string.IsNullOrWhiteSpace(x.Key) || x.Type.HasValue)
                             .Select((option, optionIndex) => new StepFieldOption
@@ -154,5 +156,33 @@ internal static class FlowDefinitionMapper
         }
 
         return JsonSerializer.Deserialize<StepApiConfigDto>(json);
+    }
+
+    private static FieldAutomationConfigDto? ParseFieldAutomationConfig(string? json, FieldType fieldType)
+    {
+        if (string.IsNullOrWhiteSpace(json) || fieldType != FieldType.Text)
+        {
+            return null;
+        }
+
+        var config = JsonSerializer.Deserialize<FieldAutomationConfigDto>(json);
+        return NormalizeFieldAutomationConfig(config, fieldType);
+    }
+
+    private static string? SerializeFieldAutomationConfig(FieldAutomationConfigDto? config, FieldType fieldType)
+    {
+        var normalized = NormalizeFieldAutomationConfig(config, fieldType);
+        return normalized is null ? null : JsonSerializer.Serialize(normalized);
+    }
+
+    private static FieldAutomationConfigDto? NormalizeFieldAutomationConfig(FieldAutomationConfigDto? config, FieldType fieldType)
+    {
+        if (config is null || fieldType != FieldType.Text || !config.EnableNfeLookup)
+        {
+            return null;
+        }
+
+        var role = string.IsNullOrWhiteSpace(config.NfeLookupRole) ? "accessKey" : config.NfeLookupRole.Trim();
+        return new FieldAutomationConfigDto(true, role);
     }
 }

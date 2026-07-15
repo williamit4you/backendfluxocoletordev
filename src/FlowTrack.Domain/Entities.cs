@@ -61,6 +61,7 @@ public sealed class StepField : Entity
     public string? Mask { get; set; }
     public bool Required { get; set; }
     public int Order { get; set; }
+    public string? ConfigurationJson { get; set; }
     public List<StepFieldOption> Options { get; set; } = [];
 }
 

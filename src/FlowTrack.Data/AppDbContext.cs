@@ -76,6 +76,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
         b.Entity<StepField>().Property(x => x.Key).HasMaxLength(120);
         b.Entity<StepField>().Property(x => x.Label).HasMaxLength(160);
         b.Entity<StepField>().Property(x => x.Mask).HasMaxLength(80);
+        b.Entity<StepField>().Property(x => x.ConfigurationJson).HasColumnType("text");
         b.Entity<StepFieldOption>().Property(x => x.Label).HasMaxLength(120);
         b.Entity<StepFieldOption>().Property(x => x.Value).HasMaxLength(240);
         b.Entity<StepFieldOption>().Property(x => x.Key).HasMaxLength(120);
