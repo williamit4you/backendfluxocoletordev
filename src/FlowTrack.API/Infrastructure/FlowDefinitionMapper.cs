@@ -35,7 +35,13 @@ internal static class FlowDefinitionMapper
                     step.Description,
                     step.Type,
                     step.Order,
-                    step.AssignedUsers.OrderBy(x => x.UserId).Select(x => x.UserId).ToList(),
+                    step.AssignedUsers
+                        .OrderBy(x => x.UserId)
+                        .Select(x => x.UserId)
+                        .Append(step.AssignedUserId.GetValueOrDefault())
+                        .Where(userId => userId != Guid.Empty)
+                        .Distinct()
+                        .ToList(),
                     step.Fields
                         .OrderBy(x => x.Order)
                         .Select(field => new FieldDto(
@@ -89,8 +95,11 @@ internal static class FlowDefinitionMapper
                 Description = string.IsNullOrWhiteSpace(step.Description) ? null : step.Description.Trim(),
                 Type = step.Type,
                 Order = stepIndex + 1,
-                AssignedUserId = step.AssignedUserIds.FirstOrDefault(),
+                AssignedUserId = step.AssignedUserIds.FirstOrDefault() is var firstAssignedUser && firstAssignedUser != Guid.Empty
+                    ? firstAssignedUser
+                    : null,
                 AssignedUsers = step.AssignedUserIds
+                    .Where(userId => userId != Guid.Empty)
                     .Distinct()
                     .Select(userId => new FlowStepUser
                     {

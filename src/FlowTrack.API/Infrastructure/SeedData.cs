@@ -164,6 +164,7 @@ internal static class SeedData
         return db.Database.ExecuteSqlRawAsync("""
             ALTER TABLE "IntegrationAttempts" ADD COLUMN IF NOT EXISTS "RequestHeaders" text;
             ALTER TABLE "IntegrationAttempts" ADD COLUMN IF NOT EXISTS "RequestBody" text;
+            ALTER TABLE "IntegrationAttempts" ALTER COLUMN "ResponsePreview" TYPE text;
             """);
     }
 }

@@ -394,8 +394,11 @@ public sealed class FlowManagementService(
                 Description = string.IsNullOrWhiteSpace(step.Description) ? null : step.Description.Trim(),
                 Type = step.Type,
                 Order = stepIndex + 1,
-                AssignedUserId = step.AssignedUserIds.FirstOrDefault(),
+                AssignedUserId = step.AssignedUserIds.FirstOrDefault() is var firstAssignedUser && firstAssignedUser != Guid.Empty
+                    ? firstAssignedUser
+                    : null,
                 AssignedUsers = step.AssignedUserIds
+                    .Where(userId => userId != Guid.Empty)
                     .Distinct()
                     .Select(userId => new FlowStepUser
                     {
@@ -758,7 +761,8 @@ public sealed class FlowManagementService(
                     Description = step.Description,
                     Type = step.Type,
                     Order = step.Order,
-                    AssignedUserId = step.AssignedUsers.Select(x => (Guid?)x.UserId).FirstOrDefault() ?? step.AssignedUserId,
+                    AssignedUserId = step.AssignedUsers.Select(x => (Guid?)x.UserId).FirstOrDefault()
+                        ?? (step.AssignedUserId.HasValue && step.AssignedUserId.Value != Guid.Empty ? step.AssignedUserId : null),
                     AssignedUsers = step.AssignedUsers
                         .Select(user => new FlowStepUser
                         {
@@ -1868,7 +1872,19 @@ public sealed class InstanceManagementService(
     {
         return actorUserId.HasValue
             && (step.AssignedUsers.Any(user => user.UserId == actorUserId.Value)
-                || step.AssignedUserId == actorUserId.Value);
+                || NormalizeAssignedUserId(step.AssignedUserId) == actorUserId.Value);
+    }
+
+    private static Guid? NormalizeAssignedUserId(Guid? assignedUserId)
+    {
+        return assignedUserId.HasValue && assignedUserId.Value != Guid.Empty
+            ? assignedUserId
+            : null;
+    }
+
+    private static bool HasStepAssignments(FlowStep step)
+    {
+        return step.AssignedUsers.Count > 0 || NormalizeAssignedUserId(step.AssignedUserId).HasValue;
     }
 
     private static bool CanStartFlow(FlowDefinition flow, FlowStep? firstStep, Guid? actorUserId)
@@ -1883,7 +1899,7 @@ public sealed class InstanceManagementService(
             return HasFlowAccess(flow, actorUserId);
         }
 
-        if (firstStep.AssignedUsers.Count > 0 || firstStep.AssignedUserId.HasValue)
+        if (HasStepAssignments(firstStep))
         {
             return HasExplicitStepAccess(firstStep, actorUserId);
         }
@@ -1893,7 +1909,7 @@ public sealed class InstanceManagementService(
 
     private static bool CanActOnStep(FlowDefinition flow, FlowStep step, Guid? actorUserId)
     {
-        var hasStepAssignments = step.AssignedUsers.Count > 0 || step.AssignedUserId.HasValue;
+        var hasStepAssignments = HasStepAssignments(step);
         var assignedToStep = HasExplicitStepAccess(step, actorUserId);
 
         if (hasStepAssignments)
@@ -1901,7 +1917,7 @@ public sealed class InstanceManagementService(
             return assignedToStep;
         }
 
-        return HasFlowAccess(flow, actorUserId) || (flow.AssignedUsers.Count == 0 && !step.AssignedUserId.HasValue);
+        return HasFlowAccess(flow, actorUserId) || (flow.AssignedUsers.Count == 0 && !NormalizeAssignedUserId(step.AssignedUserId).HasValue);
     }
 
     private async Task<bool> IsSuperAdminAsync(Guid? actorUserId, CancellationToken cancellationToken)
@@ -1927,7 +1943,7 @@ public sealed class InstanceManagementService(
             return HasFlowAccess(item.FlowDefinition, actorUserId);
         }
 
-        if (currentStep.FlowStep.AssignedUsers.Count > 0 || currentStep.FlowStep.AssignedUserId.HasValue)
+        if (HasStepAssignments(currentStep.FlowStep))
         {
             return HasExplicitStepAccess(currentStep.FlowStep, actorUserId);
         }
